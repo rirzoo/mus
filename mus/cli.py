@@ -170,7 +170,19 @@ def cmd_setup(a):
         else:
             print("  sudo rejected that password; skipped")
 
-    print("3. daemon (systemd user service)")
+    print("3. how Mus answers (Enter skips a question; edit ~/.config/mus/prefs.md any time)")
+    old = context.PREFS.read_text().strip() if context.PREFS.exists() else ""
+    if not old or input("  " + old.replace("\n", "\n  ") + "\n  change these? [y/N] ").strip().lower() == "y":
+        qs = (("Length", "short = 1-2 lines, normal, detailed = up to 6"), ("Tone", "plain, friendly, playful"),
+              ("Language", "e.g. English, Hindi"), ("Anything else", "e.g. call me R, I use fish, prefer flatpak"))
+        prefs = [f"- {q}: {v}" for q, hint in qs if (v := input(f"  {q} ({hint}): ").strip())]
+        context.PREFS.parent.mkdir(parents=True, exist_ok=True)
+        if prefs:
+            context.PREFS.write_text("\n".join(prefs) + "\n")
+        else:
+            context.PREFS.unlink(missing_ok=True)
+
+    print("4. daemon (systemd user service)")
     UNIT.parent.mkdir(parents=True, exist_ok=True)
     UNIT.write_text(f"[Unit]\nDescription=Mus errand daemon\n\n[Service]\nExecStart={sys.executable} -m mus serve\n"
                     f"Environment=PYTHONPATH={Path(__file__).resolve().parent.parent}\nRestart=on-failure\nKillMode=process\n\n"
@@ -179,7 +191,7 @@ def cmd_setup(a):
     run("systemctl", "--user", "enable", "--now", "mus")
     run("systemctl", "--user", "restart", "mus")
 
-    print("4. popup (GNOME Shell extension)")
+    print("5. popup (GNOME Shell extension)")
     run("glib-compile-schemas", str(EXT_SRC / "schemas"))
     dest = Path.home() / ".local/share/gnome-shell/extensions" / EXT_UUID
     dest.parent.mkdir(parents=True, exist_ok=True)
