@@ -169,7 +169,7 @@ def cmd_setup(a):
     print("3. daemon (systemd user service)")
     UNIT.parent.mkdir(parents=True, exist_ok=True)
     UNIT.write_text(f"[Unit]\nDescription=Mus errand daemon\n\n[Service]\nExecStart={sys.executable} -m mus serve\n"
-                    f"Environment=PYTHONPATH={Path(__file__).resolve().parent.parent}\nRestart=on-failure\n\n"
+                    f"Environment=PYTHONPATH={Path(__file__).resolve().parent.parent}\nRestart=on-failure\nKillMode=process\n\n"
                     "[Install]\nWantedBy=default.target\n")
     run("systemctl", "--user", "daemon-reload")
     run("systemctl", "--user", "enable", "--now", "mus")
