@@ -19,9 +19,9 @@ There are three parts:
 ## Why it's fast
 
 - **It remembers answers.** Answers to stable questions like "which shortcut does X" or "how do I Y" are saved in `~/.local/share/mus/memory.db`. If you ask the same thing again, even worded differently, the answer comes back in about 40 ms with no API call. Press `Ctrl+R` in the popup, or pass `--fresh`, to ask the model again.
-- **The model already knows your machine.** Every request carries a snapshot of your machine: your GNOME keybindings, default apps, installed tools, desktop apps and the folders under `~`. The snapshot is the same from one prompt to the next, so Gemini can cache it. With it, Mus answers most questions without running anything, and it knows "tools" means your `~/projects/tools` folder.
+- **The model already knows your machine.** Every request carries a snapshot of your machine: your GNOME keybindings, default apps, installed tools, desktop apps and the folders under `~`. With it, Mus answers most questions without running anything, and it knows "tools" means your `~/projects/tools` folder.
 - **Most errands take one API call.** The model writes the whole errand as a single script and includes the line to show you if it succeeds. If the script works, Mus shows that line and stops. If it fails, the model sees the error and tries again, up to 6 times.
-- **The model is the fastest one.** Mus uses Gemini 3.5 Flash-Lite with minimal thinking, and the popup opens the connection to Google while you're still typing.
+- **The model is the fastest one.** Mus uses Gemini 3.5 Flash-Lite with minimal thinking, and the popup opens the connection to Google while you're still typing. The model runs commands by writing a `<run>` block in plain text, because declaring a tool roughly doubled the wait for the first word. Each request also carries a random tag so Gemini skips its prompt cache: in testing, cache hits answered 1 to 2 s slower than fresh reads.
 
 ## Root and irreversible commands
 
@@ -34,12 +34,12 @@ The approval protects you from the model. It doesn't protect you from other prog
 ```sh
 git clone https://github.com/rirzoo/mus && cd mus
 pip install --user -e .
-mus setup        # Gemini API key, sudo password, systemd service, extension, frees Super+M
+mus setup        # Gemini API keys, sudo password, systemd service, extension, frees Super+M
 ```
 
 Then log out and back in once. On Wayland, GNOME only loads a new extension at login. `mus setup` moves `<Super>m` off the notification list, which `Super+V` still opens.
 
-If you don't have a Gemini API key yet, skip that step and Mus still answers from memory. You can get one at https://aistudio.google.com/apikey and store it with `mus setup`, or put it in `GEMINI_API_KEY`.
+If you don't have a Gemini API key yet, skip that step and Mus still answers from memory. You can get one at https://aistudio.google.com/apikey. `mus setup` asks how many keys you have and stores them all, or you can put them in `GEMINI_API_KEY`, separated by commas. With several keys, Mus counts calls per key in `~/.local/share/mus/quota.json` and moves to the next key before one reaches its limit. A key that gets a 429 anyway sits out until its quota resets, and Mus saves the limit Google reported. On the free tier, Flash-Lite allows 15 requests per minute per Google project.
 
 ## Usage
 

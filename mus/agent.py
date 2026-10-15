@@ -1,14 +1,14 @@
-"""The errand loop: memory first, then Gemini with a single `run` tool."""
+"""The errand loop: memory first, then Gemini, which runs commands by writing a <run> block."""
 import os
 import re
 import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+import uuid
 from pathlib import Path
 
-from . import context, memory
+from . import context, memory, quota
 
 MODEL = "gemini-3.5-flash-lite"  # Google's fastest model
 THINKING = "minimal"
@@ -22,20 +22,9 @@ ASKPASS = HERE / "askpass.sh"
 GATED = re.compile(r"\b(sudo|pkexec|su|rm|shred|wipefs|mkfs(\.\w+)?|fdisk|parted)\b|\bdd\b[^\n]*\bof="
                    r"|>\s*/dev/(sd|nvme|vd|mmc)|\b(chmod|chown)\s+-R\b[^\n]*\s/(\s|$)")
 BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
-TOOL = {
-    "name": "run",
-    "description": "Run one bash script on the user's machine (cwd ~, 120 s limit). Put the whole errand in a single script "
-                   "and end it with a check that it worked. Returns combined stdout/stderr and the exit code.",
-    "parameters_json_schema": {
-        "type": "object",
-        "properties": {
-            "script": {"type": "string"},
-            "done": {"type": "string", "description": "Line shown to the user if the script exits 0; `{out}` inserts "
-                                                      "its output. Empty only if you must read the output first."},
-        },
-        "required": ["script", "done"],
-    },
-}
+# a plain-text protocol instead of a declared tool: on Flash-Lite a function declaration roughly doubled time to first token
+RUN = re.compile(r"<run>[ \t]*\n?(.*?)</run>\s*(?:<done>(.*?)</done>)?", re.S)
+HOLD = len("<run>")  # stream this many chars late so a half-arrived <run> or line-start § never reaches the screen
 
 
 class NoKey(Exception):
@@ -51,29 +40,34 @@ def secret(kind):
     return r.stdout.strip() or None
 
 
-_client = None
+def api_keys():
+    """Every Gemini key: GEMINI_API_KEY / GOOGLE_API_KEY (comma or space separated) or the keyring, one per line."""
+    raw = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or secret("api") or ""
+    return re.split(r"[\s,]+", raw.strip()) if raw.strip() else []
+
+
+_clients = {}
 _last_call = 0.0
 
 
-def client():
-    global _client
-    if _client is None:
-        key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or secret("api")
-        if not key:
+def client(key=None):
+    if key is None:
+        if not (ks := api_keys()):
             raise NoKey
+        key = ks[0]
+    if key not in _clients:
         from google import genai  # ~0.4 s, so only paid when the API is actually needed
-        _client = genai.Client(api_key=key)
-    return _client
+        _clients[key] = genai.Client(api_key=key)
+    return _clients[key]
 
 
 def config():
-    # the system prompt + tools prefix never changes between prompts, so Gemini's implicit caching can reuse it
     from google.genai import types
+    # The random tag makes every prompt a cache miss on purpose. Measured on 2026-10-15: Gemini's implicit cache hits
+    # answered 1-2 s slower than misses, and free-tier keys get no caching discount to lose.
     return types.GenerateContentConfig(
-        system_instruction=SYSTEM + context.get(), max_output_tokens=8000,
-        tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**TOOL)])],
-        thinking_config=types.ThinkingConfig(thinking_level=THINKING),
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
+        system_instruction=f"[{uuid.uuid4().hex[:8]}]\n" + SYSTEM + context.get(), max_output_tokens=8000,
+        thinking_config=types.ThinkingConfig(thinking_level=THINKING))
 
 
 def warm():
@@ -83,7 +77,7 @@ def warm():
         return
     _last_call = time.time()
     try:
-        client().models.get(model=MODEL)  # free metadata call, no tokens
+        client(quota.take(api_keys(), record=False)).models.get(model=MODEL)  # free metadata call, no tokens
     except Exception:  # warming is best effort; the real request reports real errors
         pass
 
@@ -111,36 +105,33 @@ def run_script(script, sudo_ok):
 _approve_lock = threading.Lock()
 
 
-def _tool(call, session, emit, approve):
-    from google.genai import types
-    args = call.args
-
-    def result(output, ok=False, done=""):
-        part = types.Part.from_function_response(name=call.name or "run", response={"ok": ok, "output": output})
-        part.function_response.id = call.id  # pairs the result with its call when the model sends several
-        return {"ok": ok, "done": done, "part": part}
-
-    # the model's arguments are untrusted output: check the shape before running anything
-    if call.name != "run" or not (isinstance(args, dict) and isinstance(args.get("script"), str)
-                                  and isinstance(args.get("done", ""), str)):
-        return result(f"invalid call {call.name}({args!r}); call run with a string `script` and `done`")
-    script, done = args["script"], args.get("done", "")
+def _exec(script, done, session, emit, approve):
+    """Run one <run> block; returns whether it succeeded, the line to show, and what the model should hear."""
+    script = re.sub(r"^```\w*\n|\n?```$", "", script.strip())  # models sometimes fence the script anyway
+    if not script:
+        return {"ok": False, "done": "", "feedback": "Your <run> block was empty."}
     emit({"t": "run", "cmd": script})
     if GATED.search(script):
         with _approve_lock:
             if session["approved"] is None:
                 session["approved"] = bool(approve(script))
         if not session["approved"]:
-            return result("User declined to run this. Do not retry; reply with the commands for them to run themselves.")
+            return {"ok": False, "done": "",
+                    "feedback": "User declined to run this. Do not retry; reply with the commands for them to run themselves."}
     rc, out = run_script(script, session["approved"])
-    if rc:
-        return result(f"exit {rc}\n{out}")
-    return result(out or "(no output)", ok=True, done=done.replace("{out}", out.strip()[:500]))
+    done = (done or "").strip()
+    return {"ok": rc == 0, "done": done.replace("{out}", out.strip()[:500]) if rc == 0 else "",
+            "feedback": f"<output exit={rc}>\n{out or '(no output)'}\n</output>"}
 
 
-def _turn(c, contents, emit):
+def _clean(text):
+    """Visible answer text: no <run> block, and no § at the start of any line (only the first one means anything)."""
+    return re.sub(r"(^|\n)([ \t]*)§[ \t]?", r"\1\2", text.split("<run>")[0]).lstrip()
+
+
+def _stream(c, contents, emit):
     """Stream one model turn. Returns its parts exactly as received (thought signatures must go back unchanged)."""
-    parts, text, keep, lead, finish = [], [], False, True, None
+    parts, raw, sent, finish = [], "", 0, None
     for chunk in c.models.generate_content_stream(model=MODEL, contents=contents, config=config()):
         cand = (chunk.candidates or [None])[0]
         if cand is None:
@@ -148,19 +139,34 @@ def _turn(c, contents, emit):
         finish = cand.finish_reason or finish
         for p in (cand.content.parts or []) if cand.content else []:
             parts.append(p)
-            if not p.text or p.thought:
-                continue
-            t = p.text
-            if lead:  # the § marker can only sit at the very start
-                t = t.lstrip()
-                if t.startswith("§"):
-                    keep, t = True, t[1:].lstrip()
-                if not t:
-                    continue
-                lead = False
-            text.append(t)
-            emit({"t": "text", "v": t})
-    return parts, "".join(text), keep, getattr(finish, "value", finish)
+            if p.text and not p.thought:
+                raw += p.text
+        shown = _clean(raw if "<run>" in raw else raw[:max(0, len(raw) - HOLD)])
+        if len(shown) > sent:
+            emit({"t": "text", "v": shown[sent:]})
+            sent = len(shown)
+    text = _clean(raw)
+    if len(text) > sent:
+        emit({"t": "text", "v": text[sent:]})
+    return parts, raw, text, raw.lstrip().startswith("§"), getattr(finish, "value", finish)
+
+
+def _turn(contents, emit):
+    """One model turn on the key with quota left; a 429 benches that key and the turn moves to the next one."""
+    from google.genai import errors
+    ks = api_keys()
+    if not ks:
+        raise NoKey
+    for i in range(len(ks)):
+        key = quota.take(ks)
+        try:
+            return _stream(client(key), contents, emit)
+        except errors.APIError as e:
+            if e.code != 429:
+                raise
+            quota.exhausted(key, e.details)
+            if i == len(ks) - 1:
+                raise
 
 
 def ask(prompt, emit, approve, fresh=False):
@@ -168,40 +174,35 @@ def ask(prompt, emit, approve, fresh=False):
     global _last_call
     if not fresh and (hit := memory.lookup(prompt)):
         return emit({"t": "done", "v": hit, "cached": True})
-    try:
-        c = client()
-    except NoKey:
-        return emit({"t": "error", "v": "no API key; run `mus setup` (remembered answers still work)"})
     from google.genai import errors
 
     contents = [{"role": "user", "parts": [{"text": f"{prompt}\n\n(now: {time.strftime('%a %d %b %Y %H:%M')})"}]}]
     session = {"approved": None}  # one approval covers the rest of this prompt
-    ran, bad_json, turns = False, 0, 0
-    while turns < MAX_TURNS:
+    ran = False
+    for _ in range(MAX_TURNS):
         try:
-            parts, text, keep, finish = _turn(c, contents, emit)
+            parts, raw, text, keep, finish = _turn(contents, emit)
+        except NoKey:
+            return emit({"t": "error", "v": "no API key; run `mus setup` (remembered answers still work)"})
         except errors.APIError as e:
+            if e.code == 429:
+                return emit({"t": "error", "v": f"every API key is out of quota ({len(api_keys())} tried); try later"})
             return emit({"t": "error", "v": f"API error {e.code}: {e.message or e.status}"})
         _last_call = time.time()
-        if finish == "MALFORMED_FUNCTION_CALL":  # nothing to answer, so re-issue the turn
-            bad_json += 1
-            if bad_json > 2:
-                return emit({"t": "error", "v": "model kept sending malformed tool calls"})
-            continue
-        turns += 1
-        calls = [p.function_call for p in parts if p.function_call]
         if finish in BLOCKED:
             return emit({"t": "error", "v": f"the model declined this one ({finish.lower()})"})
-        if not calls:
+        runs = RUN.findall(raw)
+        if "<run>" not in raw:
             if keep and not ran:
                 memory.store(prompt, text)
             return emit({"t": "done"})
         if finish == "MAX_TOKENS":
             return emit({"t": "error", "v": "response cut off (max_tokens)"})
         ran = True
-        with ThreadPoolExecutor() as ex:
-            results = list(ex.map(lambda call: _tool(call, session, emit, approve), calls))
+        results = [_exec(script, done, session, emit, approve) for script, done in runs] or [
+            {"ok": False, "done": "", "feedback": "Your <run> block had no closing </run>; send the whole block again."}]
         if all(r["ok"] and r["done"] for r in results):  # short-circuit: no second API call just to say "done"
             return emit({"t": "done", "v": "\n".join(r["done"] for r in results)})
-        contents += [{"role": "model", "parts": parts}, {"role": "user", "parts": [r["part"] for r in results]}]
+        contents += [{"role": "model", "parts": parts},
+                     {"role": "user", "parts": [{"text": "\n\n".join(r["feedback"] for r in results)}]}]
     emit({"t": "error", "v": f"gave up after {MAX_TURNS} attempts"})

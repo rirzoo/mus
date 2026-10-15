@@ -149,11 +149,15 @@ def run(*cmd):
 def cmd_setup(a):
     if not shutil.which("secret-tool"):
         sys.exit("mus: secret-tool not found; sudo dnf install libsecret")
-    print("1. Gemini API key (https://aistudio.google.com/apikey)")
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or agent.secret("api"):
-        print("  already set")
-    elif key := getpass.getpass("  Gemini API key (Enter to skip): ").strip():
-        store_secret("api", "mus Gemini API key", key)
+    print("1. Gemini API keys (https://aistudio.google.com/apikey); with several, Mus moves on before one runs out")
+    have = agent.api_keys()
+    n = input(f"  {len(have)} stored. How many keys will you enter? (Enter keeps them) " if have
+              else "  How many keys do you have? (Enter to skip) ").strip()
+    if n.isdigit() and int(n) > 0:
+        keys = [k for i in range(int(n)) if (k := getpass.getpass(f"  key {i + 1} of {n}: ").strip())]
+        if keys:  # replaces the stored set, so include keys you already had
+            store_secret("api", "mus Gemini API keys", "\n".join(keys))
+            print(f"  stored {len(keys)} key(s)")
 
     print("2. sudo password for one-tap approvals")
     if agent.secret("sudo"):
