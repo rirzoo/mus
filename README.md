@@ -73,4 +73,4 @@ journalctl --user -u mus -f                            # daemon log
 journalctl --user -f /usr/bin/gnome-shell | grep -i mus  # extension errors
 ```
 
-To change the model, edit `MODEL` in `mus/agent.py`. The system prompt is in `mus/system.md`.
+To change the model, edit `MODEL` in `mus/agent.py`. The system prompt is in `mus/system.md`. What Mus tells people about itself, such as who made it and which model it runs on, is in `mus/about.md`.

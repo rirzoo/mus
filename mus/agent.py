@@ -16,7 +16,9 @@ MAX_TURNS = 6
 TIMEOUT = 120
 OUT_LIMIT = 4000
 HERE = Path(__file__).parent
-SYSTEM = (HERE / "system.md").read_text()
+# what Mus says about itself lives in about.md, so it answers "who made you" from facts, not guesses
+ABOUT = (HERE / "about.md").read_text().replace("{model}", MODEL)
+SYSTEM = (HERE / "system.md").read_text().replace("{about}", ABOUT)
 ASKPASS = HERE / "askpass.sh"
 # anything root or irreversible waits for the one-tap approval
 GATED = re.compile(r"\b(sudo|pkexec|su|rm|shred|wipefs|mkfs(\.\w+)?|fdisk|parted)\b|\bdd\b[^\n]*\bof="

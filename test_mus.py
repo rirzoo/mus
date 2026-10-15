@@ -114,6 +114,12 @@ def test_quota():
     assert ev[-1]["t"] == "error" and "quota" in ev[-1]["v"]
 
 
+def test_prompt():
+    # who made Mus and which model it runs on come from about.md, filled in once at import
+    assert "{about}" not in agent.SYSTEM and "{model}" not in agent.SYSTEM
+    assert "Romir made Mus" in agent.SYSTEM and agent.MODEL in agent.SYSTEM
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -17,4 +17,4 @@ mus = "mus.cli:main"
 packages = ["mus"]
 
 [tool.setuptools.package-data]
-mus = ["system.md", "askpass.sh"]
+mus = ["system.md", "about.md", "askpass.sh"]
