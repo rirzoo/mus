@@ -20,6 +20,9 @@ const TAIL = 44;      // tail box width
 const EAR = 46;
 const PAD = 10;       // gap to the screen edge
 const AUTO_HIDE_MS = 2500;
+const SHOW_MS = 1200;  // a reason face stays at least this long, so a quick retry is still seen
+const DOWN = 'Mus isn\'t running. Start it with: systemctl --user start mus';
+const OFFLINE = 'You\'re offline. Remembered answers still work.';
 const SOCK = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'mus.sock']);
 
 // same tokens as stylesheet.css, for cairo
@@ -70,8 +73,8 @@ class Mouse {
         this._mood = 'idle';
         this._lookX = 0;
         this._blinking = false;
-        this._trait = 'none';        // cosmetic overlay: blush / sweat / scar / sparkle
-        this._lastHealth = 'none';   // the last errand's trait, worn into the next greeting
+        this._trait = 'none';        // cosmetic overlay: blush / sweat / scar / bolt / ...
+        this._details = '';          // what went wrong, in words; Ctrl+D shows it
         this._gotFirst = false;
         this._t0 = 0;
         this._ttftMs = 0;
@@ -134,6 +137,8 @@ class Mouse {
         this._face.connect('notify::height', () => this._layoutTail());
         this.actor.connect('notify::height', () => this._clamp());
         this._client = new Gio.SocketClient();
+        this._net = Gio.NetworkMonitor.get_default();
+        this._netId = this._net.connect('network-changed', () => this._checkNet());
     }
 
     // --- showing and hiding -------------------------------------------------
@@ -153,10 +158,12 @@ class Mouse {
             this._entry.text = '';
             this._setAnswer('');
             this._setStatus('');
+            this._details = '';
             this._greet();
         }
         this._place();
         this.actor.show();
+        this._checkNet();
         this._scheduleBlink();
         this._grab = Main.pushModal(this.actor, {actionMode: Shell.ActionMode.POPUP});
         this._entry.grab_key_focus();
@@ -385,7 +392,7 @@ class Mouse {
     // a small overlay that reads the last/current errand's health at a glance
     _drawTrait(cr, cx) {
         const t = this._trait;
-        if (t === 'blush' || t === 'sparkle') {        // warm cheeks: snappy
+        if (t === 'blush') {                            // warm cheeks: snappy
             cr.setSourceRGBA(...PINK, 0.4);
             for (const s of [-1, 1]) {
                 cr.save();
@@ -396,14 +403,12 @@ class Mouse {
                 cr.fill();
             }
         }
-        if (t === 'sparkle') {                          // a twinkle: answered from memory
-            cr.setSourceRGBA(1, 1, 1, 0.95);
-            cr.setLineCap(Cairo.LineCap.ROUND);
-            cr.setLineWidth(1.4);
-            const sx = cx + 41, sy = 3;
-            cr.moveTo(sx - 4, sy); cr.lineTo(sx + 4, sy);
-            cr.moveTo(sx, sy - 4); cr.lineTo(sx, sy + 4);
-            cr.stroke();
+        if (t === 'bolt') {                             // a yellow ⚡, like the CLI's: answered from memory
+            cr.setSourceRGBA(1, 0.84, 0.3, 0.95);
+            for (const [px, py] of [[6, 0], [0, 9], [4, 9], [2, 17], [9, 6], [5, 6], [8, 0]])
+                cr.lineTo(cx + 39 + px, py);
+            cr.closePath();
+            cr.fill();
         }
         if (t === 'sweat') {                            // a bead of effort: slow link
             cr.setSourceRGBA(0.55, 0.78, 0.96, 0.92);
@@ -494,7 +499,7 @@ class Mouse {
         const g = moods[Math.floor(Math.random() * moods.length)];
         this._lookX = g === 'curious' ? (Math.random() < 0.5 ? -1 : 1) : 0;
         this._setMood(g);
-        this._setTrait(this._lastHealth);   // arrive wearing how the last errand went
+        this._setTrait('none');
         // wear the greeting for a moment, then settle to idle (where it blinks)
         this._timer('relax', 1800, () => {
             if (!this._run && !this._pending && this.actor.visible)
@@ -529,13 +534,15 @@ class Mouse {
 
     // --- text ---------------------------------------------------------------
 
-    _setStatus(text, error = false) {
+    _setStatus(text, style = '') {  // style: '', 'error' or 'hint'
         this._status.text = text;
         this._status.visible = !!text;
-        if (error)
-            this._status.add_style_class_name('mus-status-error');
-        else
-            this._status.remove_style_class_name('mus-status-error');
+        for (const s of ['error', 'hint']) {
+            if (s === style)
+                this._status.add_style_class_name(`mus-status-${s}`);
+            else
+                this._status.remove_style_class_name(`mus-status-${s}`);
+        }
     }
 
     _setAnswer(text) {
@@ -565,8 +572,16 @@ class Mouse {
                 this.hide();
             return Clutter.EVENT_STOP;
         }
-        if ((ev.get_state() & Clutter.ModifierType.CONTROL_MASK) && (sym === Clutter.KEY_r || sym === Clutter.KEY_R)) {
+        const ctrl = ev.get_state() & Clutter.ModifierType.CONTROL_MASK;
+        if (ctrl && (sym === Clutter.KEY_r || sym === Clutter.KEY_R)) {
             this._submit(true);
+            return Clutter.EVENT_STOP;
+        }
+        if (ctrl && (sym === Clutter.KEY_d || sym === Clutter.KEY_D) && this._details) {  // the face said something's wrong; say what
+            if (this._status.text === this._details)
+                this._setStatus('Ctrl+D for details', 'hint');
+            else
+                this._setStatus(this._details, 'error');
             return Clutter.EVENT_STOP;
         }
         return Clutter.EVENT_PROPAGATE;
@@ -593,6 +608,7 @@ class Mouse {
         this._cancel();
         this._clearTimer('autohide');
         this._ran = false;
+        this._details = '';
         this._setAnswer('');
         this._setStatus('Thinking');
         this._clearTimer('relax');       // stay thinking; don't settle to idle mid-errand
@@ -603,7 +619,7 @@ class Mouse {
         this._wait();
         const run = this._send({prompt, fresh, interactive: true}, ev => this._onEvent(ev, run), () => {
             if (this._run === run && !run.finished)
-                this._fail('Mus stopped before finishing. Check it with journalctl --user -u mus');
+                this._fail('Mus stopped before finishing. Check it with: journalctl --user -u mus');
         });
         this._run = run;
         this._timer('mood', 500, () => {   // the face moves along as the wait gets longer
@@ -624,6 +640,8 @@ class Mouse {
             // 'work' means the model started: a slow start, the network or a key swap is behind it now.
             // A retry keeps its face until the next script runs.
             const why = ev.why === 'work' ? (this._why === 'retry' ? 'retry' : '') : ev.why;
+            if (why && why !== this._why)
+                this._whyAt = GLib.get_monotonic_time();
             if (ev.v)
                 this._setStatus(ev.v);
             else if (this._why && !why)
@@ -648,14 +666,23 @@ class Mouse {
         } else if (ev.t === 'done') {
             run.finished = true;
             this._run = null;
-            this._clearTimer('mood');
             if (ev.v)
                 this._setAnswer(ev.v);
-            this._setMood('happy');
-            const trait = ev.cached ? 'sparkle'
+            const trait = ev.cached ? 'bolt'
                 : this._ttftMs < 600 ? 'blush' : this._ttftMs > 1800 ? 'sweat' : 'none';
-            this._setTrait(trait);
-            this._lastHealth = trait;   // wear it into the next greeting
+            const happy = () => {
+                this._setMood('happy');
+                this._setTrait(trait);
+                return GLib.SOURCE_REMOVE;
+            };
+            // a reason face that only just showed (a quick retry) stays up long enough to be seen
+            const shown = this._why ? (GLib.get_monotonic_time() - this._whyAt) / 1000 : SHOW_MS;
+            if (shown < SHOW_MS) {
+                this._timer('mood', SHOW_MS - shown, happy);
+            } else {
+                this._clearTimer('mood');
+                happy();
+            }
             this._setStatus(ev.cached ? 'Remembered. Ctrl+R asks again' : this._ran ? 'Done' : '');
             if (!this.actor.visible)
                 Main.notify('Mus', this._answer.trim() || 'Done');
@@ -671,13 +698,33 @@ class Mouse {
     _fail(msg, why = '') {
         this._run = null;
         this._clearTimer('mood');
+        this._trouble(why, msg);
+        if (!this.actor.visible)
+            Main.notify('Mus', msg);
+    }
+
+    // something's wrong: the face says what kind of wrong, and Ctrl+D gives the words
+    _trouble(why, details) {
+        this._clearTimer('relax');
         const [mood, trait] = FAIL[why] ?? ['sad', 'scar'];
         this._setMood(mood);
         this._setTrait(trait);
-        this._lastHealth = 'scar';
-        this._setStatus(msg, true);
-        if (!this.actor.visible)
-            Main.notify('Mus', msg);
+        this._details = details;
+        this._setStatus('Ctrl+D for details', 'hint');
+    }
+
+    // while idle, the face shows whether there's a network: offline, only remembered answers work
+    _checkNet() {
+        if (!this.actor.visible || this._run || this._pending)
+            return;
+        if (!this._net.network_available) {
+            this._trouble('network', OFFLINE);
+        } else if (this._details === OFFLINE) {
+            this._details = '';
+            this._setStatus('');
+            this._setMood('idle');
+            this._setTrait('none');
+        }
     }
 
     _reply(ok) {
@@ -708,8 +755,12 @@ class Mouse {
             try {
                 run.conn = c.connect_finish(res);
             } catch (e) {
-                if (!run.cancellable.is_cancelled() && !req.warm)
-                    this._fail('Mus isn\'t running. Start it with: systemctl --user start mus', 'down');
+                if (run.cancellable.is_cancelled())
+                    return;
+                if (!req.warm)
+                    this._fail(DOWN, 'down');
+                else if (!this._run && !this._pending)  // found out on opening: show it before the prompt is typed
+                    this._trouble('down', DOWN);
                 return;
             }
             this._write(run, req);
@@ -778,6 +829,7 @@ class Mouse {
     }
 
     destroy() {
+        this._net.disconnect(this._netId);
         this._cancel();
         for (const id of this._timers)
             GLib.source_remove(id);

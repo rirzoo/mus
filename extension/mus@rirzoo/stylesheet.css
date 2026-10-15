@@ -37,6 +37,7 @@
 
 .mus-status { color: #eef1f4; font-size: 9pt; padding: 0 6px; }
 .mus-status-error { color: #ffd6da; font-weight: bold; }
+.mus-status-hint { color: rgba(238, 241, 244, 0.5); font-size: 8pt; }  /* barely there: the face already told you */
 
 /* the answer is the payload: brighter, roomier, raised */
 .mus-answer-box {

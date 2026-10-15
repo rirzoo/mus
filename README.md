@@ -59,11 +59,10 @@ These are the popup keys:
 | `Enter` | Send the prompt, or allow a pending approval |
 | `Esc` | Close the popup, or deny a pending approval |
 | `Ctrl+R` | Ask the model again instead of using memory |
+| `Ctrl+D` | Show the details of an error |
 | Click the answer | Copy the first `code` part, or the whole answer if there isn't one |
 
 If you close the popup while an errand is still running, the result arrives as a notification.
-
-While Mus works, its face shows why it's slow. On a big errand it just tires as time passes: it concentrates after 3 s, sweats at 7 s, squeezes its eyes shut at 14 s and droops at 25 s. If the daemon knows the cause, the face shows that instead. Eyes turned up with "…" over them mean Gemini is slow to start and your network is fine. Worried brows with a weak signal mean a slow network, and a struck-out signal means Google can't be reached. Swirly eyes mean a key ran out of quota and Mus switched to the next one, and determined brows mean a script failed and Mus is trying another way. The line under the entry names the cause, and `mus` in a terminal prints it dimmed.
 
 Hints that only apply to you go in `~/.config/mus/notes.md`, which lives outside the repo. Write one per line, for example `"tools" means ~/code/tools` or `install packages with sudo dnf install -y`. Mus adds the file to its snapshot and rebuilds the snapshot after you edit it.
 
