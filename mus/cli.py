@@ -150,7 +150,7 @@ def run(*cmd):
 
 def cmd_setup(a):
     if not shutil.which("secret-tool"):
-        sys.exit("mus: secret-tool not found; sudo dnf install libsecret")
+        sys.exit("mus: secret-tool not found; install libsecret (Fedora) or libsecret-tools (Ubuntu)")
     print("1. Gemini API keys (https://aistudio.google.com/apikey); with several, Mus moves on before one runs out")
     have = agent.api_keys()
     n = input(f"  {len(have)} stored. How many keys will you enter? (Enter keeps them) " if have
