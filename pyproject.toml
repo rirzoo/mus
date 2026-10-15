@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mus"
+version = "0.1.0"
+description = "One-prompt errand mouse for the GNOME desktop: a popup plus a CLI, backed by Gemini"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["google-genai>=2,<3"]
+
+[project.scripts]
+mus = "mus.cli:main"
+
+[tool.setuptools]
+packages = ["mus"]
+
+[tool.setuptools.package-data]
+mus = ["system.md", "askpass.sh"]
