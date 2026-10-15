@@ -37,6 +37,8 @@ pip install --user -e .
 mus setup        # Gemini API keys, sudo password, answer preferences, systemd service, extension, frees Super+M
 ```
 
+On Ubuntu, `pip install --user` stops with an "externally-managed-environment" error, so install pipx (`sudo apt install pipx`) and run `pipx install -e .` instead. The popup only loads on GNOME Shell 48, which on Ubuntu means 25.04. On other releases the CLI and the daemon still work.
+
 Then log out and back in once. On Wayland, GNOME only loads a new extension at login. `mus setup` moves `<Super>m` off the notification list, which `Super+V` still opens.
 
 If you don't have a Gemini API key yet, skip that step and Mus still answers from memory. You can get one at https://aistudio.google.com/apikey. `mus setup` asks how many keys you have and stores them all, or you can put them in `GEMINI_API_KEY`, separated by commas. With several keys, Mus counts calls per key in `~/.local/share/mus/quota.json` and moves to the next key before one reaches its limit. A key that gets a 429 anyway sits out until its quota resets, and Mus saves the limit Google reported. On the free tier, Flash-Lite allows 15 requests per minute per Google project.

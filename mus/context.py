@@ -13,7 +13,7 @@ PREFS = NOTES.with_name("prefs.md")  # answer preferences, written by `mus setup
 MAX_AGE = 24 * 3600
 SKIP_DIRS = {"node_modules", "__pycache__", "venv", "site-packages", "build", "dist", "target", "snap"}
 MAX_DIRS = 1500
-TOOLS = ("fd rg jq ffmpeg magick convert pandoc yt-dlp gio nmcli dnf flatpak git gh docker podman python3 node npm "
+TOOLS = ("fd rg jq ffmpeg magick convert pandoc yt-dlp gio nmcli dnf apt snap flatpak git gh docker podman python3 node npm "
          "pip unzip 7z tar rsync curl wget xdg-open gtk-launch wl-copy wl-paste notify-send pdftotext qpdf tesseract "
          "code nvim claude exiftool trash-put ocrmypdf zip").split()
 KEY_SCHEMAS = ("org.gnome.desktop.wm.keybindings", "org.gnome.shell.keybindings", "org.gnome.mutter.keybindings",
@@ -64,7 +64,7 @@ def dirs():
 def apps():
     seen = {}
     for base in ("/usr/share/applications", "~/.local/share/applications", "/var/lib/flatpak/exports/share/applications",
-                 "~/.local/share/flatpak/exports/share/applications"):
+                 "~/.local/share/flatpak/exports/share/applications", "/var/lib/snapd/desktop/applications"):
         for f in sorted(Path(base).expanduser().glob("*.desktop")):
             try:
                 text = f.read_text(errors="replace")
