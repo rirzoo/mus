@@ -114,6 +114,41 @@ def test_quota():
     assert ev[-1]["t"] == "error" and "quota" in ev[-1]["v"]
 
 
+def waits(ev):
+    return [e["why"] for e in ev if e["t"] == "wait" and e["why"] != "work"]
+
+
+def test_wait():
+    import time
+    # each turn's first chunk says the model has started; a failed script says it's retrying, a 429 that it switched keys
+    stub, ev = run([["<run>exit 3</run><done>ok</done>"], ["fixed"]])
+    assert [e["why"] for e in ev if e["t"] == "wait"] == ["work", "retry", "work"]
+    stub, ev = run([quota_error("PerMinute", 5), ["hi"]], keys=("q1", "q2"))
+    assert waits(ev) == ["quota"]
+    # a declined approval isn't a retry
+    stub, ev = run([["<run>sudo true</run><done>ok</done>"], ["run it yourself"]])
+    assert waits(ev) == []
+    # a late first token: the ping decides whether the model, the network or the connection is the problem
+    import httpx
+
+    def ping(err):
+        def get(model, config):
+            if err:
+                raise err
+        return get
+    agent.SLOW_FIRST = 0.05
+    for err, why in ((None, "model"), (httpx.ReadTimeout("slow"), "network"), (httpx.ConnectError("down"), "offline")):
+        stub = Stub([["hi"]])
+        stub.get = ping(err)
+        gen = stub.generate_content_stream
+        stub.generate_content_stream = lambda **kw: (time.sleep(0.4), gen(**kw))[1]
+        agent.client = lambda key=None: stub
+        ev = []
+        agent.ask("q", ev.append, lambda s: False, fresh=True)
+        assert waits(ev) == [why] and ev[-1] == {"t": "done"}, ev
+    agent.SLOW_FIRST = 2.5
+
+
 def test_prompt():
     # who made Mus and which model it runs on come from about.md, filled in once at import
     assert "{about}" not in agent.SYSTEM and "{model}" not in agent.SYSTEM

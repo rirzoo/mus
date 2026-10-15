@@ -50,7 +50,7 @@ class Handler(socketserver.StreamRequestHandler):
             pass
         except Exception as e:  # keep the daemon alive and tell the popup why
             try:
-                emit({"t": "error", "v": f"{type(e).__name__}: {e}"})
+                emit({"t": "error", "why": "crash", "v": f"{type(e).__name__}: {e}"})
             except OSError:
                 pass
 
@@ -96,6 +96,8 @@ def cmd_ask(a):
             lines = ev["cmd"].strip().splitlines() or [""]
             more = f"  (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
             print(f"\033[2m$ {lines[0]}{more}\033[0m", file=sys.stderr, flush=True)
+        elif ev["t"] == "wait" and ev.get("v"):  # why it's slow: network, model, quota or a retry
+            print(f"\033[2m… {ev['v']}\033[0m", file=sys.stderr, flush=True)
         elif ev["t"] == "done":
             print(("⚡ " if ev.get("cached") else "") + ev["v"] if ev.get("v") else "")
         elif ev["t"] == "error":

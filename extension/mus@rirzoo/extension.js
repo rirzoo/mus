@@ -27,6 +27,37 @@ const FUR_DARK = [0x4e / 255, 0x58 / 255, 0x64 / 255];
 const FUR = [0x7f / 255, 0x8b / 255, 0x99 / 255];
 const PINK = [0xe8 / 255, 0xa3 / 255, 0xa8 / 255];
 const INK = [0x1f / 255, 0x25 / 255, 0x2b / 255];
+const SCAR = [0.80, 0.34, 0.37];
+
+// How Mus looks while it waits. A big errand is just a big errand: time alone walks it through WORK.
+// When the daemon says why it's slow, that reason gets its own face, so the face tells you what's holding it up.
+const WORK = [  // [after ms, mood, trait, tail swing ms (0 = still)]
+    [0, 'think', 'none', 280],
+    [3000, 'focus', 'none', 220],
+    [7000, 'focus', 'sweat', 170],
+    [14000, 'strain', 'sweat', 120],
+    [25000, 'weary', 'sweat', 700],
+];
+const WAIT = {  // why: [mood, trait, tail swing ms]
+    model: ['bored', 'dots', 900],          // network is fine, Gemini is slow to start
+    network: ['worried', 'signal', 200],    // Google is slow to reach
+    offline: ['worried', 'nosignal', 200],  // Google can't be reached
+    quota: ['dizzy', 'none', 0],            // a key ran out, switching to the next
+    retry: ['grit', 'none', 180],           // a script failed, trying another way
+};
+const FAIL = {  // error why: [mood, trait]; anything else is sad with a scar
+    network: ['worried', 'nosignal'],
+    quota: ['dizzy', 'sweat'],    // went round every key
+    key: ['confused', 'question'],
+    blocked: ['wide', 'blush'],   // the model said no
+    down: ['sleepy', 'zzz'],
+};
+const BROWS = {  // [inner, outer] brow height over the eye line, left eye then right
+    worried: [[-10, -6], [-10, -6]],   // inner ends up
+    grit: [[-6, -10], [-6, -10]],      // inner ends down: determined
+    confused: [[-7, -7], [-13, -8]],   // one brow arched up
+};
+const SHUT = ['sleepy', 'strain', 'weary', 'dizzy'];  // eyes with no blink
 
 function markup(text) {
     return GLib.markup_escape_text(text, -1)
@@ -138,7 +169,6 @@ class Mouse {
         this._clearTimer('blink');
         this._clearTimer('blinkoff');
         this._clearTimer('relax');
-        this._clearTimer('slow');
         this._blinking = false;
         if (this._grab) {
             Main.popModal(this._grab);
@@ -267,10 +297,11 @@ class Mouse {
         cr.stroke();
 
         // eyes
+        const m = this._mood;
         cr.setSourceRGB(...INK);
         for (const s of [-1, 1]) {
             const x = cx + s * dx;
-            if (this._blinking || this._mood === 'sleepy') {       // eyes shut: a content little curve
+            if (this._blinking || m === 'sleepy') {       // eyes shut: a content little curve
                 cr.setSourceRGB(...INK);
                 cr.setLineWidth(2.2);
                 cr.arc(x, ey - 2, 6, Math.PI * 0.2, Math.PI * 0.8);
@@ -284,18 +315,52 @@ class Mouse {
                 cr.moveTo(x - 4, ey + 1);
                 cr.lineTo(x + 4, ey + 1);
                 cr.stroke();
+            } else if (m === 'strain') {   // squeezed shut: > <
+                cr.setLineWidth(2.2);
+                cr.moveTo(x + s * 4, ey - 4);
+                cr.lineTo(x - s * 3, ey);
+                cr.lineTo(x + s * 4, ey + 4);
+                cr.stroke();
+            } else if (m === 'weary') {    // heavy lids: half an eye under a flat line
+                cr.arc(x, ey, 5, 0, Math.PI);
+                cr.fill();
+                cr.setLineWidth(2.2);
+                cr.moveTo(x - 6, ey);
+                cr.lineTo(x + 6, ey);
+                cr.stroke();
+            } else if (m === 'dizzy') {    // swirls
+                cr.setLineWidth(1.5);
+                for (let a = 0; a < 4 * Math.PI; a += 0.3)
+                    cr.lineTo(x + (0.6 + a * 0.42) * Math.cos(s * a), ey + (0.6 + a * 0.42) * Math.sin(s * a));
+                cr.stroke();
             } else {
-                const r = this._mood === 'wide' ? 6.5 : 5;
-                const look = this._mood === 'think' ? 2 : 0;
-                const lx = this._lookX * 2.2;   // curious: glance to one side
+                const r = m === 'wide' ? 6.5 : 5;
+                const look = m === 'think' ? 2 : 0;
+                const lx = this._lookX * 2.2;                  // curious: glance to one side
+                const ly = m === 'bored' ? -2.5 : 0;           // bored: eyes up, waiting on someone else
+                const sq = m === 'focus' || m === 'grit' ? 0.55 : 1;  // concentrating: a squint
                 cr.setSourceRGB(...INK);
-                cr.arc(x + lx, ey, r, 0, 2 * Math.PI);
+                cr.save();
+                cr.translate(x + lx, ey + ly);
+                cr.scale(1, sq);
+                cr.arc(0, 0, r, 0, 2 * Math.PI);
+                cr.restore();
                 cr.fill();
                 cr.setSourceRGBA(1, 1, 1, 0.9);
-                cr.arc(x + lx + look + 1.6, ey - 1.8 - look / 2, 1.5, 0, 2 * Math.PI);
+                cr.arc(x + lx + look + 1.6, ey + ly - 1.8 * sq - look / 2, 1.5, 0, 2 * Math.PI);
                 cr.fill();
                 cr.setSourceRGB(...INK);
             }
+        }
+        if (BROWS[m]) {
+            cr.setSourceRGB(...INK);
+            cr.setLineWidth(1.8);
+            for (const [i, s] of [-1, 1].entries()) {
+                const [inner, outer] = BROWS[m][i];
+                cr.moveTo(cx + s * (dx - 5), ey + inner);
+                cr.lineTo(cx + s * (dx + 6), ey + outer);
+            }
+            cr.stroke();
         }
 
         // nose and the little mouth under it
@@ -349,7 +414,7 @@ class Mouse {
             cr.fill();
         }
         if (t === 'scar') {                             // stitched scar: last errand broke
-            cr.setSourceRGBA(0.80, 0.34, 0.37, 0.95);
+            cr.setSourceRGBA(...SCAR, 0.95);
             cr.setLineCap(Cairo.LineCap.ROUND);
             cr.setLineWidth(1.6);
             const sx = cx - 34, sy = 2;
@@ -361,6 +426,38 @@ class Mouse {
             }
             cr.stroke();
         }
+        if (t === 'dots') {                             // "…": waiting on Gemini
+            cr.setSourceRGBA(1, 1, 1, 0.9);
+            for (const i of [0, 1, 2]) {
+                cr.arc(cx + 38 + i * 5, 4, 1.6, 0, 2 * Math.PI);
+                cr.fill();
+            }
+        }
+        if (t === 'signal' || t === 'nosignal') {       // weak signal: only the inner bar lit; none: all dim, struck out
+            const sx = cx + 44, sy = 15;
+            cr.setLineWidth(1.6);
+            for (const [i, r] of [3, 7, 11].entries()) {
+                cr.setSourceRGBA(1, 1, 1, t === 'signal' && i === 0 ? 0.95 : 0.3);
+                cr.arc(sx, sy, r, -0.75 * Math.PI, -0.25 * Math.PI);
+                cr.stroke();
+            }
+            if (t === 'nosignal') {
+                cr.setSourceRGBA(...SCAR, 0.95);
+                cr.moveTo(sx - 7, sy - 12);
+                cr.lineTo(sx + 7, sy);
+                cr.stroke();
+            }
+        }
+        if (t === 'question' || t === 'zzz') {          // "?": no key that works; "zzz": the daemon is asleep
+            cr.setSourceRGBA(1, 1, 1, 0.95);
+            cr.selectFontFace('Sans', Cairo.FontSlant.NORMAL, Cairo.FontWeight.BOLD);
+            const glyphs = t === 'question' ? [[38, 14, 14, '?']] : [[36, 18, 7, 'z'], [42, 12, 9, 'z'], [49, 7, 11, 'z']];
+            for (const [gx, gy, size, ch] of glyphs) {
+                cr.setFontSize(size);
+                cr.moveTo(cx + gx, gy);
+                cr.showText(ch);
+            }
+        }
     }
 
     _setTrait(t) {
@@ -368,16 +465,27 @@ class Mouse {
         this._mug.queue_repaint();
     }
 
-    _setMood(mood) {
+    _setMood(mood, swing = mood === 'think' ? 280 : 0) {  // swing: ms per tail flick, faster under strain
         this._mood = mood;
         this._mug.queue_repaint();
         this._tail.remove_all_transitions();
         this._tail.rotation_angle_z = 0;
-        if (mood === 'think' && St.Settings.get().enable_animations) {
+        if (swing && St.Settings.get().enable_animations) {
             this._tail.rotation_angle_z = -8;
-            this._tail.ease({rotation_angle_z: 8, duration: 280, mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+            this._tail.ease({rotation_angle_z: 8, duration: swing, mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
                 repeatCount: -1, autoReverse: true});
         }
+    }
+
+    // the face while waiting: a known reason picks its own; otherwise time walks the WORK steps
+    _wait() {
+        const ms = (GLib.get_monotonic_time() - this._t0) / 1000;
+        const [mood, trait, swing] = WAIT[this._why] ?? WORK.findLast(([after]) => ms >= after).slice(1);
+        if (`${mood} ${trait}` === this._waitKey)
+            return;
+        this._waitKey = `${mood} ${trait}`;
+        this._setMood(mood, swing);
+        this._setTrait(trait);
     }
 
     // a different face each time it scurries in
@@ -405,7 +513,7 @@ class Mouse {
     _blink() {
         if (!this.actor.visible)
             return;
-        if (this._mood === 'sleepy') {  // eyes already shut; nothing to blink
+        if (SHUT.includes(this._mood)) {  // no round eyes to blink
             this._scheduleBlink();
             return;
         }
@@ -487,37 +595,46 @@ class Mouse {
         this._ran = false;
         this._setAnswer('');
         this._setStatus('Thinking');
-        this._setMood('think');
         this._clearTimer('relax');       // stay thinking; don't settle to idle mid-errand
         this._t0 = GLib.get_monotonic_time();
         this._gotFirst = false;
-        this._setTrait('none');
+        this._why = '';
+        this._waitKey = '';
+        this._wait();
         const run = this._send({prompt, fresh, interactive: true}, ev => this._onEvent(ev, run), () => {
             if (this._run === run && !run.finished)
                 this._fail('Mus stopped before finishing. Check it with journalctl --user -u mus');
         });
         this._run = run;
-        this._timer('slow', 1800, () => {   // left waiting this long: show the strain
-            if (this._run === run && !this._gotFirst)
-                this._setTrait('sweat');
-            return GLib.SOURCE_REMOVE;
+        this._timer('mood', 500, () => {   // the face moves along as the wait gets longer
+            if (this._run === run && !this._pending)
+                this._wait();
+            return GLib.SOURCE_CONTINUE;
         });
     }
 
     _onEvent(ev, run) {
         if (this._run !== run)
             return;
-        if (!this._gotFirst && ['text', 'run', 'approve', 'done'].includes(ev.t)) {
+        if (!this._gotFirst && (['text', 'run', 'approve', 'done'].includes(ev.t) || ev.why === 'work')) {
             this._gotFirst = true;
-            this._clearTimer('slow');
             this._ttftMs = (GLib.get_monotonic_time() - this._t0) / 1000;  // time to first token
-            if (ev.t !== 'done')   // a running errand: react now; 'done' sets the final trait below
-                this._setTrait(this._ttftMs < 600 ? 'blush' : this._ttftMs > 1800 ? 'sweat' : 'none');
         }
-        if (ev.t === 'text') {
+        if (ev.t === 'wait') {
+            // 'work' means the model started: a slow start, the network or a key swap is behind it now.
+            // A retry keeps its face until the next script runs.
+            const why = ev.why === 'work' ? (this._why === 'retry' ? 'retry' : '') : ev.why;
+            if (ev.v)
+                this._setStatus(ev.v);
+            else if (this._why && !why)
+                this._setStatus('Thinking');
+            this._why = why;
+            this._wait();
+        } else if (ev.t === 'text') {
             this._setAnswer(this._answer + ev.v);
         } else if (ev.t === 'run') {
             this._ran = true;
+            this._why = '';
             const line = ev.cmd.trim().split('\n').find(l => !/^set -e/.test(l.trim())) || '';
             this._setStatus(`Running ${line.length > 60 ? `${line.slice(0, 60)}…` : line}`);
         } else if (ev.t === 'approve') {
@@ -531,6 +648,7 @@ class Mouse {
         } else if (ev.t === 'done') {
             run.finished = true;
             this._run = null;
+            this._clearTimer('mood');
             if (ev.v)
                 this._setAnswer(ev.v);
             this._setMood('happy');
@@ -546,15 +664,16 @@ class Mouse {
         } else if (ev.t === 'error') {
             run.finished = true;
             this._run = null;
-            this._fail(ev.v);
+            this._fail(ev.v, ev.why);
         }
     }
 
-    _fail(msg) {
+    _fail(msg, why = '') {
         this._run = null;
-        this._clearTimer('slow');
-        this._setMood('sad');
-        this._setTrait('scar');
+        this._clearTimer('mood');
+        const [mood, trait] = FAIL[why] ?? ['sad', 'scar'];
+        this._setMood(mood);
+        this._setTrait(trait);
         this._lastHealth = 'scar';
         this._setStatus(msg, true);
         if (!this.actor.visible)
@@ -566,7 +685,9 @@ class Mouse {
             return;
         this._pending = false;
         this._approve.hide();
-        this._setMood(ok ? 'think' : 'idle');
+        this._t0 = GLib.get_monotonic_time();  // time spent deciding isn't Mus being slow
+        this._waitKey = '';
+        this._wait();
         this._setStatus(ok ? 'Allowed for this errand' : 'Denied');
         this._write(this._run, {approve: ok});
     }
@@ -588,7 +709,7 @@ class Mouse {
                 run.conn = c.connect_finish(res);
             } catch (e) {
                 if (!run.cancellable.is_cancelled() && !req.warm)
-                    this._fail('Mus isn\'t running. Start it with: systemctl --user start mus');
+                    this._fail('Mus isn\'t running. Start it with: systemctl --user start mus', 'down');
                 return;
             }
             this._write(run, req);
@@ -637,6 +758,7 @@ class Mouse {
             this._run.conn?.close(null);
             this._run = null;
         }
+        this._clearTimer('mood');
         this._pending = false;
         this._approve.hide();
     }

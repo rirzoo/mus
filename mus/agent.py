@@ -27,6 +27,8 @@ BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
 # a plain-text protocol instead of a declared tool: on Flash-Lite a function declaration roughly doubled time to first token
 RUN = re.compile(r"<run>[ \t]*\n?(.*?)</run>\s*(?:<done>(.*?)</done>)?", re.S)
 HOLD = len("<run>")  # stream this many chars late so a half-arrived <run> or line-start § never reaches the screen
+# no first token by now (usually ~1.5 s): ping Google to tell a slow network from a slow model; a ping is ~0.2-0.4 s
+SLOW_FIRST, SLOW_PING = 2.5, 1.0
 
 
 class NoKey(Exception):
@@ -131,22 +133,55 @@ def _clean(text):
     return re.sub(r"(^|\n)([ \t]*)§[ \t]?", r"\1\2", text.split("<run>")[0]).lstrip()
 
 
+def _probe(c, emit, started, lock):
+    """The first token is late: a free metadata call says whether the network or the model is the slow part."""
+    import httpx
+    try:  # the ping gives up at SLOW_PING, so a slow network is reported as soon as it shows
+        c.models.get(model=MODEL, config={"http_options": {"timeout": int(SLOW_PING * 1000)}})
+        ev = {"t": "wait", "why": "model", "v": "Gemini is slow to start; your network is fine"}
+    except httpx.TimeoutException:
+        ev = {"t": "wait", "why": "network", "v": f"Slow network: Google took over {SLOW_PING:g} s to answer a ping"}
+    except httpx.TransportError:
+        ev = {"t": "wait", "why": "offline", "v": "Can't reach Google; still trying"}
+    except Exception:  # can't tell; say nothing rather than guess
+        return
+    with lock:
+        if not started.is_set():
+            try:
+                emit(ev)
+            except OSError:  # the popup already went away
+                pass
+
+
 def _stream(c, contents, emit):
     """Stream one model turn. Returns its parts exactly as received (thought signatures must go back unchanged)."""
     parts, raw, sent, finish = [], "", 0, None
-    for chunk in c.models.generate_content_stream(model=MODEL, contents=contents, config=config()):
-        cand = (chunk.candidates or [None])[0]
-        if cand is None:
-            continue
-        finish = cand.finish_reason or finish
-        for p in (cand.content.parts or []) if cand.content else []:
-            parts.append(p)
-            if p.text and not p.thought:
-                raw += p.text
-        shown = _clean(raw if "<run>" in raw else raw[:max(0, len(raw) - HOLD)])
-        if len(shown) > sent:
-            emit({"t": "text", "v": shown[sent:]})
-            sent = len(shown)
+    started, lock = threading.Event(), threading.Lock()
+    timer = threading.Timer(SLOW_FIRST, _probe, (c, emit, started, lock))
+    timer.daemon = True
+    timer.start()
+    try:
+        for chunk in c.models.generate_content_stream(model=MODEL, contents=contents, config=config()):
+            if not started.is_set():
+                with lock:  # so a late probe can't report a slow start after the model has already started
+                    started.set()
+                    emit({"t": "wait", "why": "work"})  # the model is answering; whatever held it up is over
+            cand = (chunk.candidates or [None])[0]
+            if cand is None:
+                continue
+            finish = cand.finish_reason or finish
+            for p in (cand.content.parts or []) if cand.content else []:
+                parts.append(p)
+                if p.text and not p.thought:
+                    raw += p.text
+            shown = _clean(raw if "<run>" in raw else raw[:max(0, len(raw) - HOLD)])
+            if len(shown) > sent:
+                emit({"t": "text", "v": shown[sent:]})
+                sent = len(shown)
+    finally:
+        timer.cancel()
+        with lock:
+            started.set()  # turn over (or failed): a probe still in flight stays quiet
     text = _clean(raw)
     if len(text) > sent:
         emit({"t": "text", "v": text[sent:]})
@@ -169,6 +204,7 @@ def _turn(contents, emit):
             quota.exhausted(key, e.details)
             if i == len(ks) - 1:
                 raise
+            emit({"t": "wait", "why": "quota", "v": "That key ran out of quota; trying the next one"})
 
 
 def ask(prompt, emit, approve, fresh=False):
@@ -176,35 +212,43 @@ def ask(prompt, emit, approve, fresh=False):
     global _last_call
     if not fresh and (hit := memory.lookup(prompt)):
         return emit({"t": "done", "v": hit, "cached": True})
+    import httpx
     from google.genai import errors
 
     contents = [{"role": "user", "parts": [{"text": f"{prompt}\n\n(now: {time.strftime('%a %d %b %Y %H:%M')})"}]}]
     session = {"approved": None}  # one approval covers the rest of this prompt
     ran = False
-    for _ in range(MAX_TURNS):
+    # every error says why, so the popup can show what went wrong at a glance
+    for turn in range(MAX_TURNS):
         try:
             parts, raw, text, keep, finish = _turn(contents, emit)
         except NoKey:
-            return emit({"t": "error", "v": "no API key; run `mus setup` (remembered answers still work)"})
+            return emit({"t": "error", "why": "key", "v": "no API key; run `mus setup` (remembered answers still work)"})
+        except httpx.TransportError as e:
+            return emit({"t": "error", "why": "network", "v": f"can't reach Google; check the connection ({type(e).__name__})"})
         except errors.APIError as e:
             if e.code == 429:
-                return emit({"t": "error", "v": f"every API key is out of quota ({len(api_keys())} tried); try later"})
-            return emit({"t": "error", "v": f"API error {e.code}: {e.message or e.status}"})
+                return emit({"t": "error", "why": "quota",
+                             "v": f"every API key is out of quota ({len(api_keys())} tried); try later"})
+            why = "key" if e.code in (401, 403) or "API key" in (e.message or "") else "api"
+            return emit({"t": "error", "why": why, "v": f"API error {e.code}: {e.message or e.status}"})
         _last_call = time.time()
         if finish in BLOCKED:
-            return emit({"t": "error", "v": f"the model declined this one ({finish.lower()})"})
+            return emit({"t": "error", "why": "blocked", "v": f"the model declined this one ({finish.lower()})"})
         runs = RUN.findall(raw)
         if "<run>" not in raw:
             if keep and not ran:
                 memory.store(prompt, text)
             return emit({"t": "done"})
         if finish == "MAX_TOKENS":
-            return emit({"t": "error", "v": "response cut off (max_tokens)"})
+            return emit({"t": "error", "why": "cutoff", "v": "response cut off (max_tokens)"})
         ran = True
         results = [_exec(script, done, session, emit, approve) for script, done in runs] or [
             {"ok": False, "done": "", "feedback": "Your <run> block had no closing </run>; send the whole block again."}]
         if all(r["ok"] and r["done"] for r in results):  # short-circuit: no second API call just to say "done"
             return emit({"t": "done", "v": "\n".join(r["done"] for r in results)})
+        if not all(r["ok"] for r in results) and session["approved"] is not False:  # a decline isn't a retry
+            emit({"t": "wait", "why": "retry", "v": f"That didn't work; trying another way ({turn + 2} of {MAX_TURNS})"})
         contents += [{"role": "model", "parts": parts},
                      {"role": "user", "parts": [{"text": "\n\n".join(r["feedback"] for r in results)}]}]
-    emit({"t": "error", "v": f"gave up after {MAX_TURNS} attempts"})
+    emit({"t": "error", "why": "gaveup", "v": f"gave up after {MAX_TURNS} attempts"})
