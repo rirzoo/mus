@@ -8,6 +8,7 @@ from pathlib import Path
 
 HOME = Path.home()
 CACHE = HOME / ".cache/mus/snapshot.txt"
+NOTES = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "mus/notes.md"  # personal hints, never in the repo
 MAX_AGE = 24 * 3600
 SKIP_DIRS = {"node_modules", "__pycache__", "venv", "site-packages", "build", "dist", "target", "snap"}
 MAX_DIRS = 1500
@@ -92,6 +93,10 @@ def build():
         "desktop apps: Name (desktop id for gtk-launch)": apps(),
         f"directories under ~ (depth 3, hidden skipped)": dirs(),
     }
+    try:
+        sections["notes from the user (trust these over guesses)"] = [NOTES.read_text().strip()]
+    except OSError:
+        pass
     return "\n\n".join(f"## {title}\n" + "\n".join(lines) for title, lines in sections.items())
 
 
@@ -106,13 +111,17 @@ _memo = (0.0, "")
 
 
 def get():
-    """Snapshot text, rebuilt when older than a day; memoized on mtime so the daemon pays one stat per prompt."""
+    """Snapshot text, rebuilt when older than a day or when notes.md changed; memoized on mtime so the daemon pays two stats per prompt."""
     global _memo
     try:
         mtime = CACHE.stat().st_mtime
     except OSError:
         mtime = 0
-    if time.time() - mtime > MAX_AGE:
+    try:
+        stale = NOTES.stat().st_mtime > mtime
+    except OSError:
+        stale = False
+    if stale or time.time() - mtime > MAX_AGE:
         _memo = (time.time(), refresh())
     elif mtime != _memo[0]:
         _memo = (mtime, CACHE.read_text())

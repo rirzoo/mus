@@ -63,6 +63,8 @@ These are the popup keys:
 
 If you close the popup while an errand is still running, the result arrives as a notification.
 
+Hints that only apply to you go in `~/.config/mus/notes.md`, which lives outside the repo. Write one per line, for example `"tools" means ~/code/tools` or `install packages with sudo dnf install -y`. Mus adds the file to its snapshot and rebuilds the snapshot after you edit it.
+
 ## Development
 
 ```sh
