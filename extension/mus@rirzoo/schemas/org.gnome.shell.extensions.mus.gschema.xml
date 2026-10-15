@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.mus" path="/org/gnome/shell/extensions/mus/">
+    <key name="mus-toggle" type="as">
+      <default><![CDATA[['<Super>m']]]></default>
+      <summary>Wake Mus</summary>
+    </key>
+  </schema>
+</schemalist>

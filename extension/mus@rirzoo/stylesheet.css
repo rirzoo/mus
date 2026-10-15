@@ -1,0 +1,53 @@
+/* house-mouse palette: agouti fur, darker fur, ear/nose pink, belly fur, bead-eye ink */
+.mus-face {
+  background-color: #75695e;
+  border-radius: 28px;
+  padding: 4px 12px 12px 12px;
+  spacing: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
+}
+
+.mus-ear { background-color: #75695e; border-radius: 23px; }
+.mus-ear-inner { background-color: #e8a3a8; border-radius: 12px; }
+
+.mus-entry {
+  background-color: #ddd5cb;
+  color: #2b2420;
+  caret-color: #2b2420;
+  selection-background-color: #e8a3a8;
+  selected-color: #2b2420;
+  border: none;
+  border-radius: 16px;
+  padding: 8px 14px;
+  font-size: 11pt;
+}
+.mus-entry:focus { box-shadow: inset 0 0 0 2px #4f463e; }
+.mus-entry StLabel.hint-text { color: rgba(43, 36, 32, 0.55); }
+
+.mus-status { color: #f3ede6; font-size: 9pt; padding: 0 6px; }
+.mus-status-error { color: #ffd6da; font-weight: bold; }
+
+.mus-answer-box {
+  background-color: #ddd5cb;
+  border-radius: 16px;
+  padding: 10px 14px;
+  max-height: 300px;
+}
+.mus-answer { color: #2b2420; font-size: 10.5pt; }
+
+.mus-approve {
+  background-color: #4f463e;
+  border-radius: 16px;
+  padding: 10px 12px;
+  spacing: 8px;
+}
+.mus-approve-title { color: #f3ede6; font-size: 9.5pt; font-weight: bold; }
+.mus-approve-cmd { color: #f3ede6; font-family: monospace; font-size: 9pt; }
+.mus-approve-row { spacing: 8px; }
+
+.mus-btn { border-radius: 12px; padding: 5px 16px; font-weight: bold; }
+.mus-btn:focus { box-shadow: 0 0 0 2px #f3ede6; }
+.mus-allow { background-color: #e8a3a8; color: #2b2420; }
+.mus-allow:hover { background-color: #f1bcc0; }
+.mus-deny { color: #f3ede6; border: 1px solid #75695e; }
+.mus-deny:hover { background-color: #5c5249; }

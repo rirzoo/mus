@@ -1,0 +1,543 @@
+// Mus popup: a little mouse that scurries in from a screen edge, takes one prompt, and talks to `mus serve`.
+import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
+import Pango from 'gi://Pango';
+import Shell from 'gi://Shell';
+import St from 'gi://St';
+import Cairo from 'cairo';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+const W = 340;        // whole mouse, tail included
+const TAIL = 44;      // tail box width
+const EAR = 46;
+const PAD = 10;       // gap to the screen edge
+const AUTO_HIDE_MS = 2500;
+const SOCK = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'mus.sock']);
+
+// same tokens as stylesheet.css, for cairo
+const FUR_DARK = [0x4f / 255, 0x46 / 255, 0x3e / 255];
+const FUR = [0x75 / 255, 0x69 / 255, 0x5e / 255];
+const PINK = [0xe8 / 255, 0xa3 / 255, 0xa8 / 255];
+const INK = [0x2b / 255, 0x24 / 255, 0x20 / 255];
+
+function markup(text) {
+    return GLib.markup_escape_text(text, -1)
+        .replace(/`([^`\n]+)`/g, '<tt>$1</tt>')
+        .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+}
+
+class Mouse {
+    constructor() {
+        this._mood = 'idle';
+        this._run = null;
+        this._answer = '';
+        this._timers = new Set();
+
+        this.actor = new St.Widget({reactive: true, track_hover: true, visible: false});
+
+        this._tail = new St.DrawingArea({width: TAIL, height: 56});
+        this._tail.connect('repaint', a => this._drawTail(a));
+        this._ears = [0, 1].map(() => {
+            const ear = new St.Widget({style_class: 'mus-ear', width: EAR, height: EAR});
+            ear.add_child(new St.Widget({style_class: 'mus-ear-inner', x: 11, y: 11, width: 24, height: 24}));
+            return ear;
+        });
+
+        this._face = new St.BoxLayout({style_class: 'mus-face', vertical: true, y: 24, width: W - TAIL + 14});
+        this._mug = new St.DrawingArea({height: 34, x_expand: true});
+        this._mug.connect('repaint', a => this._drawMug(a));
+        this._entry = new St.Entry({style_class: 'mus-entry', hint_text: 'What\'s the errand?', can_focus: true, x_expand: true});
+        this._entry.clutter_text.connect('activate', () => (this._pending ? this._reply(true) : this._submit(false)));
+        this._status = new St.Label({style_class: 'mus-status', visible: false});
+        this._status.clutter_text.line_wrap = true;
+
+        this._approve = new St.BoxLayout({style_class: 'mus-approve', vertical: true, visible: false});
+        this._approveCmd = new St.Label({style_class: 'mus-approve-cmd'});
+        this._approveCmd.clutter_text.line_wrap = true;
+        const row = new St.BoxLayout({style_class: 'mus-approve-row', x_align: Clutter.ActorAlign.END});
+        const allow = new St.Button({style_class: 'mus-btn mus-allow', label: 'Allow', can_focus: true});
+        const deny = new St.Button({style_class: 'mus-btn mus-deny', label: 'Deny', can_focus: true});
+        allow.connect('clicked', () => this._reply(true));
+        deny.connect('clicked', () => this._reply(false));
+        row.add_child(deny);
+        row.add_child(allow);
+        const title = new St.Label({style_class: 'mus-approve-title', text: 'Needs root or can\'t be undone. Allow for this errand?'});
+        title.clutter_text.line_wrap = true;
+        this._approve.add_child(title);
+        this._approve.add_child(this._approveCmd);
+        this._approve.add_child(row);
+
+        this._scroll = new St.ScrollView({style_class: 'mus-answer-box', visible: false,
+            hscrollbar_policy: St.PolicyType.NEVER, vscrollbar_policy: St.PolicyType.AUTOMATIC});
+        const box = new St.BoxLayout({vertical: true});
+        this._label = new St.Label({style_class: 'mus-answer', reactive: true});
+        this._label.clutter_text.line_wrap = true;
+        this._label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        this._label.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        this._label.connect('button-press-event', () => this._copy());
+        box.add_child(this._label);
+        this._scroll.set_child(box);
+
+        for (const w of [this._mug, this._entry, this._status, this._approve, this._scroll])
+            this._face.add_child(w);
+        for (const w of [this._tail, ...this._ears, this._face])
+            this.actor.add_child(w);
+
+        this.actor.connect('key-press-event', (a, ev) => this._onKey(ev));
+        this.actor.connect('button-press-event', (a, ev) => this._onClickOutside(ev));
+        this._face.connect('notify::height', () => this._layoutTail());
+        this.actor.connect('notify::height', () => this._clamp());
+        this._client = new Gio.SocketClient();
+    }
+
+    // --- showing and hiding -------------------------------------------------
+
+    toggle() {
+        if (this.actor.visible && !this._leaving)
+            this.hide();
+        else
+            this.show();
+    }
+
+    show() {
+        if (this.actor.visible && !this._leaving)
+            return;
+        this.actor.remove_all_transitions();  // reopened mid-exit: stop the exit (its onStopped hides) and come back
+        if (!this._run && !this._pending) {
+            this._entry.text = '';
+            this._setAnswer('');
+            this._setStatus('');
+            this._setMood('idle');
+        }
+        this._place();
+        this.actor.show();
+        this._grab = Main.pushModal(this.actor, {actionMode: Shell.ActionMode.POPUP});
+        this._entry.grab_key_focus();
+        this.actor.ease({translation_x: 0, translation_y: 0, duration: 220, mode: Clutter.AnimationMode.EASE_OUT_BACK});
+        this._send({warm: true}, () => {}, () => {});
+    }
+
+    hide() {
+        this._clearTimer('autohide');
+        if (this._grab) {
+            Main.popModal(this._grab);
+            this._grab = null;
+        }
+        this._leaving = true;
+        this.actor.ease({...this._offscreen(), duration: 150, mode: Clutter.AnimationMode.EASE_IN_QUAD,
+            onStopped: () => {
+                this._leaving = false;
+                this.actor.hide();
+            }});
+    }
+
+    // pick a random edge and a random spot along it, like a mouse poking out of the skirting board
+    _place() {
+        const mon = Main.layoutManager.currentMonitor;
+        const wa = Main.layoutManager.getWorkAreaForMonitor(mon.index);
+        const edge = ['left', 'right', 'top', 'bottom'][Math.floor(Math.random() * 4)];
+        const tailLeft = edge === 'left' || (edge !== 'right' && Math.random() < 0.5);
+        this._layout(tailLeft);
+        const [, h] = this.actor.get_preferred_height(W);
+        const t = 0.1 + Math.random() * 0.8;
+        let x = wa.x + t * (wa.width - W), y = wa.y + t * (wa.height - h);
+        if (edge === 'left') x = wa.x + PAD;
+        if (edge === 'right') x = wa.x + wa.width - W - PAD;
+        if (edge === 'top') y = wa.y + PAD;
+        if (edge === 'bottom') y = wa.y + wa.height - h - PAD;
+        this._edge = {edge, mon, wa};
+        this.actor.set_position(Math.round(x), Math.round(y));
+        const off = this._offscreen();
+        this.actor.translation_x = off.translation_x;
+        this.actor.translation_y = off.translation_y;
+    }
+
+    _offscreen() {
+        const {edge, mon} = this._edge;
+        const [x, y] = this.actor.get_position();
+        const [w, h] = this.actor.get_size();
+        return {
+            translation_x: edge === 'left' ? mon.x - x - w : edge === 'right' ? mon.x + mon.width - x : 0,
+            translation_y: edge === 'top' ? mon.y - y - h : edge === 'bottom' ? mon.y + mon.height - y : 0,
+        };
+    }
+
+    // the face grows as the answer streams in: keep it on screen, and glued to the bottom edge if it came from there
+    _clamp() {
+        if (!this._edge || !this.actor.visible)
+            return;
+        const {edge, wa} = this._edge;
+        const h = this.actor.height;
+        let [x, y] = this.actor.get_position();
+        if (edge === 'bottom' || y + h > wa.y + wa.height - PAD)
+            y = Math.max(wa.y + PAD, wa.y + wa.height - h - PAD);
+        this.actor.set_position(x, y);
+    }
+
+    _layout(tailLeft) {
+        this._tailLeft = tailLeft;
+        const faceX = tailLeft ? TAIL - 14 : 0;
+        this._face.x = faceX;
+        this._ears[0].set_position(faceX + 8, 0);
+        this._ears[1].set_position(faceX + this._face.width - EAR - 8, 0);
+        this._tail.x = tailLeft ? 0 : faceX + this._face.width - 14;
+        this._tail.queue_repaint();
+        this._layoutTail();
+    }
+
+    _layoutTail() {
+        this._tail.y = this._face.y + this._face.height - 46;
+        this._tail.set_pivot_point(this._tailLeft ? 1 : 0, 0.8);
+    }
+
+    // --- drawing ------------------------------------------------------------
+
+    _drawTail(area) {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        if (this._tailLeft) {  // drawn for a tail curling right, mirrored when it sits on the left
+            cr.translate(w, 0);
+            cr.scale(-1, 1);
+        }
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setSourceRGB(...PINK);
+        cr.setLineWidth(3.5);
+        cr.moveTo(2, h - 14);
+        cr.curveTo(w * 0.55, h - 2, w * 0.95, h - 18, w * 0.7, h * 0.35);
+        cr.curveTo(w * 0.55, h * 0.1, w * 0.3, h * 0.25, w * 0.45, h * 0.4);
+        cr.stroke();
+        cr.$dispose();
+    }
+
+    _drawMug(area) {
+        const cr = area.get_context();
+        const [w] = area.get_surface_size();
+        const cx = w / 2, ey = 13, dx = 30;
+        cr.setLineCap(Cairo.LineCap.ROUND);
+
+        // whiskers
+        cr.setSourceRGBA(...FUR_DARK, 0.9);
+        cr.setLineWidth(1.2);
+        for (const s of [-1, 1]) {
+            for (const [dy, len] of [[-3, 52], [1, 56], [5, 50]]) {
+                cr.moveTo(cx + s * 10, 23 + dy / 2);
+                cr.lineTo(cx + s * len, 23 + dy * 1.6);
+            }
+        }
+        cr.stroke();
+
+        // eyes
+        cr.setSourceRGB(...INK);
+        for (const s of [-1, 1]) {
+            const x = cx + s * dx;
+            if (this._mood === 'happy') {
+                cr.setLineWidth(2.2);
+                cr.arc(x, ey + 3, 5, Math.PI * 1.1, Math.PI * 1.9);
+                cr.stroke();
+            } else if (this._mood === 'sad') {
+                cr.setLineWidth(2.2);
+                cr.moveTo(x - 4, ey + 1);
+                cr.lineTo(x + 4, ey + 1);
+                cr.stroke();
+            } else {
+                const r = this._mood === 'wide' ? 6.5 : 5;
+                const look = this._mood === 'think' ? 2 : 0;
+                cr.setSourceRGB(...INK);
+                cr.arc(x, ey, r, 0, 2 * Math.PI);
+                cr.fill();
+                cr.setSourceRGBA(1, 1, 1, 0.9);
+                cr.arc(x + look + 1.6, ey - 1.8 - look / 2, 1.5, 0, 2 * Math.PI);
+                cr.fill();
+                cr.setSourceRGB(...INK);
+            }
+        }
+
+        // nose and the little mouth under it
+        cr.setSourceRGB(...PINK);
+        cr.save();
+        cr.translate(cx, 22);
+        cr.scale(1.3, 1);
+        cr.arc(0, 0, 4, 0, 2 * Math.PI);
+        cr.restore();
+        cr.fill();
+        cr.setSourceRGB(...FUR_DARK);
+        cr.setLineWidth(1.4);
+        cr.arc(cx - 3, 27, 3, 0, Math.PI);
+        cr.stroke();
+        cr.arc(cx + 3, 27, 3, 0, Math.PI);
+        cr.stroke();
+        cr.$dispose();
+    }
+
+    _setMood(mood) {
+        this._mood = mood;
+        this._mug.queue_repaint();
+        this._tail.remove_all_transitions();
+        this._tail.rotation_angle_z = 0;
+        if (mood === 'think' && St.Settings.get().enable_animations) {
+            this._tail.rotation_angle_z = -8;
+            this._tail.ease({rotation_angle_z: 8, duration: 280, mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                repeatCount: -1, autoReverse: true});
+        }
+    }
+
+    // --- text ---------------------------------------------------------------
+
+    _setStatus(text, error = false) {
+        this._status.text = text;
+        this._status.visible = !!text;
+        if (error)
+            this._status.add_style_class_name('mus-status-error');
+        else
+            this._status.remove_style_class_name('mus-status-error');
+    }
+
+    _setAnswer(text) {
+        this._answer = text;
+        this._label.clutter_text.set_markup(markup(text.trim()));
+        this._scroll.visible = !!text.trim();
+    }
+
+    _copy() {
+        const code = this._answer.match(/`([^`\n]+)`/);
+        const text = code ? code[1] : this._answer.trim();
+        if (!text)
+            return Clutter.EVENT_PROPAGATE;
+        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+        this._setStatus(code ? `Copied ${text}` : 'Copied the answer');
+        return Clutter.EVENT_STOP;
+    }
+
+    // --- input --------------------------------------------------------------
+
+    _onKey(ev) {
+        const sym = ev.get_key_symbol();
+        if (sym === Clutter.KEY_Escape) {
+            if (this._pending)
+                this._reply(false);
+            else
+                this.hide();
+            return Clutter.EVENT_STOP;
+        }
+        if ((ev.get_state() & Clutter.ModifierType.CONTROL_MASK) && (sym === Clutter.KEY_r || sym === Clutter.KEY_R)) {
+            this._submit(true);
+            return Clutter.EVENT_STOP;
+        }
+        return Clutter.EVENT_PROPAGATE;
+    }
+
+    _onClickOutside(ev) {
+        const [ex, ey] = ev.get_coords();
+        const [x, y] = this.actor.get_transformed_position();
+        const [w, h] = this.actor.get_transformed_size();
+        if (ex < x || ey < y || ex > x + w || ey > y + h) {
+            this.hide();
+            return Clutter.EVENT_STOP;
+        }
+        return Clutter.EVENT_PROPAGATE;
+    }
+
+    // --- talking to the daemon ----------------------------------------------
+
+    _submit(fresh) {
+        const prompt = this._entry.text.trim() || (fresh ? this._lastPrompt : '');
+        if (!prompt)
+            return;
+        this._lastPrompt = prompt;
+        this._cancel();
+        this._clearTimer('autohide');
+        this._ran = false;
+        this._setAnswer('');
+        this._setStatus('Thinking');
+        this._setMood('think');
+        const run = this._send({prompt, fresh, interactive: true}, ev => this._onEvent(ev, run), () => {
+            if (this._run === run && !run.finished)
+                this._fail('Mus stopped before finishing. Check it with journalctl --user -u mus');
+        });
+        this._run = run;
+    }
+
+    _onEvent(ev, run) {
+        if (this._run !== run)
+            return;
+        if (ev.t === 'text') {
+            this._setAnswer(this._answer + ev.v);
+        } else if (ev.t === 'run') {
+            this._ran = true;
+            const line = ev.cmd.trim().split('\n').find(l => !/^set -e/.test(l.trim())) || '';
+            this._setStatus(`Running ${line.length > 60 ? `${line.slice(0, 60)}…` : line}`);
+        } else if (ev.t === 'approve') {
+            this._pending = true;
+            this._approveCmd.text = ev.cmd.trim().split('\n').slice(0, 6).join('\n');
+            this._approve.show();
+            this._setMood('wide');
+            this._setStatus('');
+            this.show();
+            this._entry.grab_key_focus();
+        } else if (ev.t === 'done') {
+            run.finished = true;
+            this._run = null;
+            if (ev.v)
+                this._setAnswer(ev.v);
+            this._setMood('happy');
+            this._setStatus(ev.cached ? 'Remembered. Ctrl+R asks again' : this._ran ? 'Done' : '');
+            if (!this.actor.visible)
+                Main.notify('Mus', this._answer.trim() || 'Done');
+            else if (this._ran)
+                this._autoHide();
+        } else if (ev.t === 'error') {
+            run.finished = true;
+            this._run = null;
+            this._fail(ev.v);
+        }
+    }
+
+    _fail(msg) {
+        this._run = null;
+        this._setMood('sad');
+        this._setStatus(msg, true);
+        if (!this.actor.visible)
+            Main.notify('Mus', msg);
+    }
+
+    _reply(ok) {
+        if (!this._pending || !this._run?.conn)
+            return;
+        this._pending = false;
+        this._approve.hide();
+        this._setMood(ok ? 'think' : 'idle');
+        this._setStatus(ok ? 'Allowed for this errand' : 'Denied');
+        this._write(this._run, {approve: ok});
+    }
+
+    _autoHide() {
+        this._timer('autohide', AUTO_HIDE_MS, () => {
+            if (this.actor.hover)
+                return GLib.SOURCE_CONTINUE;
+            this.hide();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // one JSON request out, JSON-line events back; never blocks the shell
+    _send(req, onEvent, onEnd) {
+        const run = {cancellable: new Gio.Cancellable(), conn: null, finished: false};
+        this._client.connect_async(Gio.UnixSocketAddress.new(SOCK), run.cancellable, (c, res) => {
+            try {
+                run.conn = c.connect_finish(res);
+            } catch (e) {
+                if (!run.cancellable.is_cancelled() && !req.warm)
+                    this._fail('Mus isn\'t running. Start it with: systemctl --user start mus');
+                return;
+            }
+            this._write(run, req);
+            const input = Gio.DataInputStream.new(run.conn.get_input_stream());
+            const next = () => input.read_line_async(GLib.PRIORITY_DEFAULT, run.cancellable, (s, r) => {
+                let line;
+                try {
+                    [line] = s.read_line_finish_utf8(r);
+                } catch (e) {
+                    if (!run.cancellable.is_cancelled())
+                        this._fail(`Lost Mus mid-errand: ${e.message}`);
+                    return;
+                }
+                if (line === null) {
+                    run.conn.close(null);
+                    onEnd();
+                    return;
+                }
+                try {
+                    onEvent(JSON.parse(line));
+                } catch (e) {
+                    logError(e, 'mus');
+                }
+                next();
+            });
+            next();
+        });
+        return run;
+    }
+
+    _write(run, obj) {
+        const bytes = new GLib.Bytes(new TextEncoder().encode(`${JSON.stringify(obj)}\n`));
+        run.conn.get_output_stream().write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, run.cancellable, (s, r) => {
+            try {
+                s.write_bytes_finish(r);
+            } catch (e) {
+                if (!run.cancellable.is_cancelled())
+                    logError(e, 'mus write');
+            }
+        });
+    }
+
+    _cancel() {
+        if (this._run) {
+            this._run.cancellable.cancel();
+            this._run.conn?.close(null);
+            this._run = null;
+        }
+        this._pending = false;
+        this._approve.hide();
+    }
+
+    _timer(name, ms, fn) {
+        this._clearTimer(name);
+        const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, fn);
+        this._timers.add(id);
+        this[`_${name}Id`] = id;
+    }
+
+    _clearTimer(name) {
+        const id = this[`_${name}Id`];
+        if (id && this._timers.delete(id))
+            GLib.source_remove(id);
+        this[`_${name}Id`] = 0;
+    }
+
+    destroy() {
+        this._cancel();
+        for (const id of this._timers)
+            GLib.source_remove(id);
+        this._timers.clear();
+        if (this._grab)
+            Main.popModal(this._grab);
+        this.actor.destroy();
+    }
+}
+
+export default class MusExtension extends Extension {
+    enable() {
+        this._mouse = new Mouse();
+        Main.layoutManager.addTopChrome(this._mouse.actor);
+
+        this._button = new PanelMenu.Button(0.0, 'Mus', true);
+        this._button.add_child(new St.Icon({
+            gicon: Gio.icon_new_for_string(`${this.path}/icons/mus-symbolic.svg`),
+            style_class: 'system-status-icon',
+        }));
+        this._button.connect('button-press-event', () => {
+            this._mouse.toggle();
+            return Clutter.EVENT_STOP;
+        });
+        Main.panel.addToStatusArea(this.uuid, this._button);
+
+        Main.wm.addKeybinding('mus-toggle', this.getSettings(), Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW | Shell.ActionMode.POPUP, () => this._mouse.toggle());
+    }
+
+    disable() {
+        Main.wm.removeKeybinding('mus-toggle');
+        this._button?.destroy();
+        this._button = null;
+        if (this._mouse) {
+            Main.layoutManager.removeChrome(this._mouse.actor);
+            this._mouse.destroy();
+        }
+        this._mouse = null;
+    }
+}
