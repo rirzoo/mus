@@ -34,7 +34,7 @@ The approval protects you from the model. It doesn't protect you from other prog
 ```sh
 git clone https://github.com/rirzoo/mus && cd mus
 pip install --user -e .
-mus setup        # Gemini API keys, sudo password, systemd service, extension, frees Super+M
+mus setup        # Gemini API keys, sudo password, answer preferences, systemd service, extension, frees Super+M
 ```
 
 Then log out and back in once. On Wayland, GNOME only loads a new extension at login. `mus setup` moves `<Super>m` off the notification list, which `Super+V` still opens.
@@ -64,6 +64,8 @@ These are the popup keys:
 If you close the popup while an errand is still running, the result arrives as a notification.
 
 Hints that only apply to you go in `~/.config/mus/notes.md`, which lives outside the repo. Write one per line, for example `"tools" means ~/code/tools` or `install packages with sudo dnf install -y`. Mus adds the file to its snapshot and rebuilds the snapshot after you edit it.
+
+`mus setup` also asks how you want answers: length, tone, language and anything else. It saves them in `~/.config/mus/prefs.md`, which you can edit later. Whatever you set, Mus still gives one reply of at most about 6 lines.
 
 ## Development
 
