@@ -12,7 +12,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const W = 340;        // whole mouse, tail included
+const W = 340;        // base mouse width, tail included
+const W_TALL = 262;   // vertical edges: narrow and tall
+const W_WIDE = 388;   // horizontal edges: wide and short
+const W_SQUARE = 316; // corners: compact
 const TAIL = 44;      // tail box width
 const EAR = 46;
 const PAD = 10;       // gap to the screen edge
@@ -20,10 +23,10 @@ const AUTO_HIDE_MS = 2500;
 const SOCK = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'mus.sock']);
 
 // same tokens as stylesheet.css, for cairo
-const FUR_DARK = [0x4f / 255, 0x46 / 255, 0x3e / 255];
-const FUR = [0x75 / 255, 0x69 / 255, 0x5e / 255];
+const FUR_DARK = [0x4e / 255, 0x58 / 255, 0x64 / 255];
+const FUR = [0x7f / 255, 0x8b / 255, 0x99 / 255];
 const PINK = [0xe8 / 255, 0xa3 / 255, 0xa8 / 255];
-const INK = [0x2b / 255, 0x24 / 255, 0x20 / 255];
+const INK = [0x1f / 255, 0x25 / 255, 0x2b / 255];
 
 function markup(text) {
     return GLib.markup_escape_text(text, -1)
@@ -34,6 +37,13 @@ function markup(text) {
 class Mouse {
     constructor() {
         this._mood = 'idle';
+        this._lookX = 0;
+        this._blinking = false;
+        this._trait = 'none';        // cosmetic overlay: blush / sweat / scar / sparkle
+        this._lastHealth = 'none';   // the last errand's trait, worn into the next greeting
+        this._gotFirst = false;
+        this._t0 = 0;
+        this._ttftMs = 0;
         this._run = null;
         this._answer = '';
         this._timers = new Set();
@@ -112,10 +122,11 @@ class Mouse {
             this._entry.text = '';
             this._setAnswer('');
             this._setStatus('');
-            this._setMood('idle');
+            this._greet();
         }
         this._place();
         this.actor.show();
+        this._scheduleBlink();
         this._grab = Main.pushModal(this.actor, {actionMode: Shell.ActionMode.POPUP});
         this._entry.grab_key_focus();
         this.actor.ease({translation_x: 0, translation_y: 0, duration: 220, mode: Clutter.AnimationMode.EASE_OUT_BACK});
@@ -124,6 +135,11 @@ class Mouse {
 
     hide() {
         this._clearTimer('autohide');
+        this._clearTimer('blink');
+        this._clearTimer('blinkoff');
+        this._clearTimer('relax');
+        this._clearTimer('slow');
+        this._blinking = false;
         if (this._grab) {
             Main.popModal(this._grab);
             this._grab = null;
@@ -136,25 +152,44 @@ class Mouse {
             }});
     }
 
-    // pick a random edge and a random spot along it, like a mouse poking out of the skirting board
+    // pick a random edge, and let the aspect follow it: tall on the sides, wide on top/bottom, compact in corners
     _place() {
         const mon = Main.layoutManager.currentMonitor;
         const wa = Main.layoutManager.getWorkAreaForMonitor(mon.index);
         const edge = ['left', 'right', 'top', 'bottom'][Math.floor(Math.random() * 4)];
+        const vert = edge === 'left' || edge === 'right';
+        const corner = Math.random() < 0.3;   // sometimes hug a corner instead of sliding along the edge
+        const [w, cls] = corner ? [W_SQUARE, 'mus-square']
+            : vert ? [W_TALL, 'mus-tall'] : [W_WIDE, 'mus-wide'];
+        this._w = w;
+        this._face.width = w - TAIL + 14;
+        this._setAspect(cls);
         const tailLeft = edge === 'left' || (edge !== 'right' && Math.random() < 0.5);
         this._layout(tailLeft);
-        const [, h] = this.actor.get_preferred_height(W);
-        const t = 0.1 + Math.random() * 0.8;
-        let x = wa.x + t * (wa.width - W), y = wa.y + t * (wa.height - h);
-        if (edge === 'left') x = wa.x + PAD;
-        if (edge === 'right') x = wa.x + wa.width - W - PAD;
-        if (edge === 'top') y = wa.y + PAD;
-        if (edge === 'bottom') y = wa.y + wa.height - h - PAD;
+        const [, h] = this.actor.get_preferred_height(w);
+        const far = Math.random() < 0.5;       // which corner, when hugging one
+        const slide = () => 0.15 + Math.random() * 0.7;  // keep off the extreme ends
+        let x, y;
+        if (vert) {
+            x = edge === 'left' ? wa.x + PAD : wa.x + wa.width - w - PAD;
+            y = corner ? (far ? wa.y + PAD : wa.y + wa.height - h - PAD)
+                : wa.y + slide() * (wa.height - h);
+        } else {
+            y = edge === 'top' ? wa.y + PAD : wa.y + wa.height - h - PAD;
+            x = corner ? (far ? wa.x + PAD : wa.x + wa.width - w - PAD)
+                : wa.x + slide() * (wa.width - w);
+        }
         this._edge = {edge, mon, wa};
         this.actor.set_position(Math.round(x), Math.round(y));
         const off = this._offscreen();
         this.actor.translation_x = off.translation_x;
         this.actor.translation_y = off.translation_y;
+    }
+
+    _setAspect(cls) {
+        for (const c of ['mus-tall', 'mus-wide', 'mus-square'])
+            this._face.remove_style_class_name(c);
+        this._face.add_style_class_name(cls);
     }
 
     _offscreen() {
@@ -235,7 +270,12 @@ class Mouse {
         cr.setSourceRGB(...INK);
         for (const s of [-1, 1]) {
             const x = cx + s * dx;
-            if (this._mood === 'happy') {
+            if (this._blinking || this._mood === 'sleepy') {       // eyes shut: a content little curve
+                cr.setSourceRGB(...INK);
+                cr.setLineWidth(2.2);
+                cr.arc(x, ey - 2, 6, Math.PI * 0.2, Math.PI * 0.8);
+                cr.stroke();
+            } else if (this._mood === 'happy') {
                 cr.setLineWidth(2.2);
                 cr.arc(x, ey + 3, 5, Math.PI * 1.1, Math.PI * 1.9);
                 cr.stroke();
@@ -247,11 +287,12 @@ class Mouse {
             } else {
                 const r = this._mood === 'wide' ? 6.5 : 5;
                 const look = this._mood === 'think' ? 2 : 0;
+                const lx = this._lookX * 2.2;   // curious: glance to one side
                 cr.setSourceRGB(...INK);
-                cr.arc(x, ey, r, 0, 2 * Math.PI);
+                cr.arc(x + lx, ey, r, 0, 2 * Math.PI);
                 cr.fill();
                 cr.setSourceRGBA(1, 1, 1, 0.9);
-                cr.arc(x + look + 1.6, ey - 1.8 - look / 2, 1.5, 0, 2 * Math.PI);
+                cr.arc(x + lx + look + 1.6, ey - 1.8 - look / 2, 1.5, 0, 2 * Math.PI);
                 cr.fill();
                 cr.setSourceRGB(...INK);
             }
@@ -271,7 +312,60 @@ class Mouse {
         cr.stroke();
         cr.arc(cx + 3, 27, 3, 0, Math.PI);
         cr.stroke();
+
+        this._drawTrait(cr, cx);
         cr.$dispose();
+    }
+
+    // a small overlay that reads the last/current errand's health at a glance
+    _drawTrait(cr, cx) {
+        const t = this._trait;
+        if (t === 'blush' || t === 'sparkle') {        // warm cheeks: snappy
+            cr.setSourceRGBA(...PINK, 0.4);
+            for (const s of [-1, 1]) {
+                cr.save();
+                cr.translate(cx + s * 25, 26);
+                cr.scale(1.5, 1);
+                cr.arc(0, 0, 5, 0, 2 * Math.PI);
+                cr.restore();
+                cr.fill();
+            }
+        }
+        if (t === 'sparkle') {                          // a twinkle: answered from memory
+            cr.setSourceRGBA(1, 1, 1, 0.95);
+            cr.setLineCap(Cairo.LineCap.ROUND);
+            cr.setLineWidth(1.4);
+            const sx = cx + 41, sy = 3;
+            cr.moveTo(sx - 4, sy); cr.lineTo(sx + 4, sy);
+            cr.moveTo(sx, sy - 4); cr.lineTo(sx, sy + 4);
+            cr.stroke();
+        }
+        if (t === 'sweat') {                            // a bead of effort: slow link
+            cr.setSourceRGBA(0.55, 0.78, 0.96, 0.92);
+            const tx = cx + 42, ty = 1;
+            cr.moveTo(tx, ty);
+            cr.curveTo(tx - 4, ty + 7, tx - 4, ty + 12, tx, ty + 12);
+            cr.curveTo(tx + 4, ty + 12, tx + 4, ty + 7, tx, ty);
+            cr.fill();
+        }
+        if (t === 'scar') {                             // stitched scar: last errand broke
+            cr.setSourceRGBA(0.80, 0.34, 0.37, 0.95);
+            cr.setLineCap(Cairo.LineCap.ROUND);
+            cr.setLineWidth(1.6);
+            const sx = cx - 34, sy = 2;
+            cr.moveTo(sx, sy); cr.lineTo(sx + 7, sy + 15);
+            cr.stroke();
+            for (let i = 1; i <= 3; i++) {              // little cross-stitches
+                const px = sx + (7 * i) / 4, py = sy + (15 * i) / 4;
+                cr.moveTo(px - 3, py + 1.5); cr.lineTo(px + 3, py - 1.5);
+            }
+            cr.stroke();
+        }
+    }
+
+    _setTrait(t) {
+        this._trait = t;
+        this._mug.queue_repaint();
     }
 
     _setMood(mood) {
@@ -284,6 +378,45 @@ class Mouse {
             this._tail.ease({rotation_angle_z: 8, duration: 280, mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
                 repeatCount: -1, autoReverse: true});
         }
+    }
+
+    // a different face each time it scurries in
+    _greet() {
+        const moods = ['idle', 'happy', 'wide', 'sleepy', 'curious'];
+        const g = moods[Math.floor(Math.random() * moods.length)];
+        this._lookX = g === 'curious' ? (Math.random() < 0.5 ? -1 : 1) : 0;
+        this._setMood(g);
+        this._setTrait(this._lastHealth);   // arrive wearing how the last errand went
+        // wear the greeting for a moment, then settle to idle (where it blinks)
+        this._timer('relax', 1800, () => {
+            if (!this._run && !this._pending && this.actor.visible)
+                this._setMood('idle');
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _scheduleBlink() {
+        this._timer('blink', 2500 + Math.random() * 3500, () => {
+            this._blink();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _blink() {
+        if (!this.actor.visible)
+            return;
+        if (this._mood === 'sleepy') {  // eyes already shut; nothing to blink
+            this._scheduleBlink();
+            return;
+        }
+        this._blinking = true;
+        this._mug.queue_repaint();
+        this._timer('blinkoff', 140, () => {
+            this._blinking = false;
+            this._mug.queue_repaint();
+            this._scheduleBlink();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // --- text ---------------------------------------------------------------
@@ -355,16 +488,32 @@ class Mouse {
         this._setAnswer('');
         this._setStatus('Thinking');
         this._setMood('think');
+        this._clearTimer('relax');       // stay thinking; don't settle to idle mid-errand
+        this._t0 = GLib.get_monotonic_time();
+        this._gotFirst = false;
+        this._setTrait('none');
         const run = this._send({prompt, fresh, interactive: true}, ev => this._onEvent(ev, run), () => {
             if (this._run === run && !run.finished)
                 this._fail('Mus stopped before finishing. Check it with journalctl --user -u mus');
         });
         this._run = run;
+        this._timer('slow', 1800, () => {   // left waiting this long: show the strain
+            if (this._run === run && !this._gotFirst)
+                this._setTrait('sweat');
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _onEvent(ev, run) {
         if (this._run !== run)
             return;
+        if (!this._gotFirst && ['text', 'run', 'approve', 'done'].includes(ev.t)) {
+            this._gotFirst = true;
+            this._clearTimer('slow');
+            this._ttftMs = (GLib.get_monotonic_time() - this._t0) / 1000;  // time to first token
+            if (ev.t !== 'done')   // a running errand: react now; 'done' sets the final trait below
+                this._setTrait(this._ttftMs < 600 ? 'blush' : this._ttftMs > 1800 ? 'sweat' : 'none');
+        }
         if (ev.t === 'text') {
             this._setAnswer(this._answer + ev.v);
         } else if (ev.t === 'run') {
@@ -385,6 +534,10 @@ class Mouse {
             if (ev.v)
                 this._setAnswer(ev.v);
             this._setMood('happy');
+            const trait = ev.cached ? 'sparkle'
+                : this._ttftMs < 600 ? 'blush' : this._ttftMs > 1800 ? 'sweat' : 'none';
+            this._setTrait(trait);
+            this._lastHealth = trait;   // wear it into the next greeting
             this._setStatus(ev.cached ? 'Remembered. Ctrl+R asks again' : this._ran ? 'Done' : '');
             if (!this.actor.visible)
                 Main.notify('Mus', this._answer.trim() || 'Done');
@@ -399,7 +552,10 @@ class Mouse {
 
     _fail(msg) {
         this._run = null;
+        this._clearTimer('slow');
         this._setMood('sad');
+        this._setTrait('scar');
+        this._lastHealth = 'scar';
         this._setStatus(msg, true);
         if (!this.actor.visible)
             Main.notify('Mus', msg);

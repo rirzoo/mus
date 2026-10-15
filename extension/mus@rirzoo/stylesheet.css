@@ -1,53 +1,65 @@
-/* house-mouse palette: agouti fur, darker fur, ear/nose pink, belly fur, bead-eye ink */
+/* house-mouse palette: blue-grey fur, darker fur, ear/nose pink, cool belly, bead-eye ink */
 .mus-face {
-  background-color: #75695e;
-  border-radius: 28px;
+  background-color: #7f8b99;            /* fallback if the gradient doesn't draw */
+  background-gradient-direction: vertical;
+  background-gradient-start: #8e9aa8;  /* lit crown */
+  background-gradient-end: #626e7c;    /* shaded chin */
+  border-radius: 46px 46px 22px 22px;  /* domed crown, snug chin — less boxy */
   padding: 4px 12px 12px 12px;
   spacing: 8px;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.42);
 }
 
-.mus-ear { background-color: #75695e; border-radius: 23px; }
+/* aspect follows the edge it ran in from */
+.mus-face.mus-tall { padding: 22px 12px 30px 12px; }   /* vertical edges: taller */
+.mus-face.mus-wide { padding: 2px 12px 8px 12px; }     /* horizontal edges: shorter */
+.mus-face.mus-square { padding: 12px 12px 18px 12px; } /* corners: compact */
+
+/* darker fill so the ear reads against the lit crown, lighter rim to catch the light */
+.mus-ear { background-color: #525d6a; border: 2px solid #99a5b3; border-radius: 23px; }
 .mus-ear-inner { background-color: #e8a3a8; border-radius: 12px; }
 
+/* entry sits back: quieter, recessed */
 .mus-entry {
-  background-color: #ddd5cb;
-  color: #2b2420;
-  caret-color: #2b2420;
+  background-color: #c4c9d0;
+  color: #20262b;
+  caret-color: #20262b;
   selection-background-color: #e8a3a8;
-  selected-color: #2b2420;
+  selected-color: #20262b;
   border: none;
   border-radius: 16px;
   padding: 8px 14px;
   font-size: 11pt;
+  box-shadow: inset 0 1px 3px rgba(31, 37, 43, 0.22);
 }
-.mus-entry:focus { box-shadow: inset 0 0 0 2px #4f463e; }
-.mus-entry StLabel.hint-text { color: rgba(43, 36, 32, 0.55); }
+.mus-entry:focus { box-shadow: inset 0 0 0 2px #4e5864; }
+.mus-entry StLabel.hint-text { color: rgba(31, 37, 43, 0.55); }
 
-.mus-status { color: #f3ede6; font-size: 9pt; padding: 0 6px; }
+.mus-status { color: #eef1f4; font-size: 9pt; padding: 0 6px; }
 .mus-status-error { color: #ffd6da; font-weight: bold; }
 
+/* the answer is the payload: brighter, roomier, raised */
 .mus-answer-box {
-  background-color: #ddd5cb;
+  background-color: #eef0f3;
   border-radius: 16px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   max-height: 300px;
 }
-.mus-answer { color: #2b2420; font-size: 10.5pt; }
+.mus-answer { color: #20262b; font-size: 10.5pt; }
 
 .mus-approve {
-  background-color: #4f463e;
+  background-color: #3a434e;
   border-radius: 16px;
   padding: 10px 12px;
   spacing: 8px;
 }
-.mus-approve-title { color: #f3ede6; font-size: 9.5pt; font-weight: bold; }
-.mus-approve-cmd { color: #f3ede6; font-family: monospace; font-size: 9pt; }
+.mus-approve-title { color: #eef1f4; font-size: 9.5pt; font-weight: bold; }
+.mus-approve-cmd { color: #eef1f4; font-family: monospace; font-size: 9pt; }
 .mus-approve-row { spacing: 8px; }
 
 .mus-btn { border-radius: 12px; padding: 5px 16px; font-weight: bold; }
-.mus-btn:focus { box-shadow: 0 0 0 2px #f3ede6; }
-.mus-allow { background-color: #e8a3a8; color: #2b2420; }
+.mus-btn:focus { box-shadow: 0 0 0 2px #eef1f4; }
+.mus-allow { background-color: #e8a3a8; color: #20262b; }
 .mus-allow:hover { background-color: #f1bcc0; }
-.mus-deny { color: #f3ede6; border: 1px solid #75695e; }
-.mus-deny:hover { background-color: #5c5249; }
+.mus-deny { color: #eef1f4; border: 1px solid #626e7c; }
+.mus-deny:hover { background-color: #4b545f; }
