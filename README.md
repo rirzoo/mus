@@ -37,7 +37,7 @@ pip install --user -e .
 mus setup        # Gemini API keys, sudo password, answer preferences, systemd service, extension, frees Super+M
 ```
 
-On Ubuntu, `pip install --user` stops with an "externally-managed-environment" error, so install pipx (`sudo apt install pipx`) and run `pipx install -e .` instead. The popup only loads on GNOME Shell 48, which on Ubuntu means 25.04. On other releases the CLI and the daemon still work.
+On Ubuntu, `pip install --user` stops with an "externally-managed-environment" error, so install pipx (`sudo apt install pipx`) and run `pipx install -e .` instead. The popup loads on GNOME Shell 48, 49 and 50, which on Ubuntu means 25.04 or later. On older releases the CLI and the daemon still work.
 
 Then log out and back in once. On Wayland, GNOME only loads a new extension at login. `mus setup` moves `<Super>m` off the notification list, which `Super+V` still opens.
 

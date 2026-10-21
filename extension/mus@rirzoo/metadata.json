@@ -2,7 +2,7 @@
   "uuid": "mus@rirzoo",
   "name": "Mus",
   "description": "A little mouse that pops out from a screen edge and runs one-prompt errands. Needs the `mus` daemon.",
-  "shell-version": ["48"],
+  "shell-version": ["48", "49", "50"],
   "settings-schema": "org.gnome.shell.extensions.mus",
   "url": ""
 }
