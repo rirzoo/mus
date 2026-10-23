@@ -1,20 +1,37 @@
 # Mus
 
-Mus is a small mouse that pops out from a random edge of your GNOME screen and does one errand per prompt. You can ask it something like "what's the shortcut to open the browser?" or "move file1.jpg and file2.jpg from Downloads to tools". It never asks you a follow-up question. If your prompt could mean more than one thing, it either answers each reading or does the safe, reversible one and tells you what it assumed.
+<p align="center"><img src="media/demo.gif" width="880" alt="Mus pops out from different edges of a GNOME desktop four times: it answers that Alt+Print takes a screenshot of one window, moves the photos from Downloads to Pictures/Photos, opens the downloaded invoice in Document Viewer, and switches the desktop to dark mode"></p>
 
-```
-$ mus "what shortcut opens the terminal"
-⚡ Press `Super+T` (your custom Terminal shortcut).
-$ mus "move a.jpg b.jpg from Downloads to tools"
-$ set -e  (+3 lines)
-Moved a.jpg and b.jpg to ~/projects/tools.
-```
+Mus is a small mouse that pops out from a random edge of your GNOME screen and does one errand per prompt. You can ask it something like "what's the shortcut to open the browser?" or "move file1.jpg and file2.jpg from Downloads to tools". It never asks you a follow-up question. If your prompt could mean more than one thing, it either answers each reading or does the safe, reversible one and tells you what it assumed.
 
 There are three parts:
 
 - **A popup.** This is a GNOME Shell extension. Press `Super+M` or click the mouse icon in the top bar to open it.
 - **A daemon (`mus serve`).** It runs as a systemd user service and does the actual work. The popup and the CLI both talk to it over `$XDG_RUNTIME_DIR/mus.sock`.
 - **The `mus` CLI.** You can use it from a terminal, a script or Claude Code. If the daemon isn't running, the CLI does the work itself.
+
+## The popup
+
+This is the popup at each step of an errand. The screenshots and recordings come from a headless GNOME Shell with a made-up home folder, and the answers are real Gemini replies.
+
+<table>
+  <tr>
+    <td align="center"><img src="media/typed.png" width="400" alt="The popup with a prompt typed in"><br>Type an errand and press Enter</td>
+    <td align="center"><img src="media/thinking.png" width="400" alt="The popup showing Thinking"><br>Mus works on it</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="media/answer.png" width="400" alt="The popup with an answer under the prompt"><br>The answer</td>
+    <td align="center"><img src="media/remembered.png" width="400" alt="The popup saying Remembered. Ctrl+R asks again"><br>A question it has answered before comes back from memory</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="media/done.png" width="400" alt="The popup saying it moved the photos from Downloads to Pictures/Photos"><br>An errand that ran commands</td>
+    <td align="center"><img src="media/approve.png" width="400" alt="The popup asking to allow sudo dnf upgrade, with Deny and Allow buttons"><br>Root or irreversible commands wait for Allow</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="media/denied.png" width="400" alt="The popup telling you to run sudo dnf upgrade yourself"><br>Deny, and Mus tells you what to run yourself</td>
+    <td align="center"><img src="media/details.png" width="400" alt="The popup showing the error Mus isn't running"><br>When something goes wrong, Ctrl+D says what</td>
+  </tr>
+</table>
 
 ## Why it's fast
 
@@ -44,6 +61,16 @@ Then log out and back in once. On Wayland, GNOME only loads a new extension at l
 If you don't have a Gemini API key yet, skip that step and Mus still answers from memory. You can get one at https://aistudio.google.com/apikey. `mus setup` asks how many keys you have and stores them all, or you can put them in `GEMINI_API_KEY`, separated by commas. With several keys, Mus counts calls per key in `~/.local/share/mus/quota.json` and moves to the next key before one reaches its limit. A key that gets a 429 anyway sits out until its quota resets, and Mus saves the limit Google reported. On the free tier, Flash-Lite allows 15 requests per minute per Google project.
 
 ## Usage
+
+In a terminal it looks like this:
+
+```
+$ mus "what shortcut opens the terminal"
+⚡ Press `Super+T` (your custom Terminal shortcut).
+$ mus "move a.jpg b.jpg from Downloads to tools"
+$ set -e  (+3 lines)
+Moved a.jpg and b.jpg to ~/projects/tools.
+```
 
 | Command | What it does |
 |---|---|
